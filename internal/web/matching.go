@@ -12,8 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vodarr/vodarr/internal/arr"
 	"github.com/vodarr/vodarr/internal/config"
 	"github.com/vodarr/vodarr/internal/index"
+	"github.com/vodarr/vodarr/internal/strm"
 	vodarrsync "github.com/vodarr/vodarr/internal/sync"
 	"github.com/vodarr/vodarr/internal/tmdb"
 	"github.com/vodarr/vodarr/internal/xtream"
@@ -261,6 +263,38 @@ func (h *Handler) writeMatchResult(w http.ResponseWriter, item *index.Item, err 
 	default:
 		h.writeJSON(w, map[string]interface{}{"item": item})
 	}
+}
+
+// handleArrRepair finishes past imports the webhook never handled, for every
+// configured Sonarr/Radarr instance (see arr.RepairImports).
+func (h *Handler) handleArrRepair(w http.ResponseWriter, r *http.Request) {
+	h.cfgMu.RLock()
+	instances := h.cfg.Arr.Instances
+	outputPath := h.cfg.Output.Path
+	mode := h.cfg.Output.Mode
+	unmonitor := h.cfg.Arr.UnmonitorDelivered
+	h.cfgMu.RUnlock()
+
+	if mode == "download" {
+		h.writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "download mode imports real files; there is nothing to repair"})
+		return
+	}
+	if len(instances) == 0 {
+		h.writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "no Sonarr/Radarr instances configured"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	finish := func(libMkv, sourceMkv string) error {
+		return strm.FinishImport(libMkv, sourceMkv, outputPath)
+	}
+	searcher := arr.NewSearcher()
+	results := make([]arr.RepairResult, 0, len(instances))
+	for _, inst := range instances {
+		results = append(results, searcher.RepairImports(ctx, inst, finish, unmonitor))
+	}
+	h.writeJSON(w, map[string]interface{}{"results": results})
 }
 
 func parseMediaType(s string) (index.MediaType, bool) {

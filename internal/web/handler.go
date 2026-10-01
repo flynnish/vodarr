@@ -13,7 +13,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -129,6 +128,7 @@ func (h *Handler) registerRoutes(staticFS fs.FS) {
 	h.mux.HandleFunc("POST /api/arr/test", auth(h.handleArrTest))
 	h.mux.HandleFunc("GET /api/arr/status", auth(h.handleArrStatus))
 	h.mux.HandleFunc("POST /api/arr/setup", auth(h.handleArrSetup))
+	h.mux.HandleFunc("POST /api/arr/repair", auth(h.handleArrRepair))
 	h.mux.HandleFunc("POST /api/strm/refresh", auth(h.handleStrmRefresh))
 	h.mux.HandleFunc("GET /api/sync/history", auth(h.handleSyncHistory))
 	h.mux.HandleFunc("GET /api/logs/download", auth(h.handleLogsDownload))
@@ -743,73 +743,22 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Safety: path must be absolute
-	if !filepath.IsAbs(mkvPath) {
-		slog.Warn("webhook: received non-absolute path, ignoring", "path", mkvPath)
-		h.writeJSON(w, map[string]string{"status": "ok"})
-		return
-	}
-
 	// Download mode imports real media; there are no stubs to clean up.
 	h.cfgMu.RLock()
 	mode := h.cfg.Output.Mode
+	outputPath := h.cfg.Output.Path
 	h.cfgMu.RUnlock()
 	if mode == "download" {
 		h.writeJSON(w, map[string]string{"status": "ok"})
 		return
 	}
 
-	if _, err := os.Stat(mkvPath); err != nil {
-		// Most often the library is not mounted into the VODarr container at
-		// the same path arr sees it, so the file is invisible from here.
-		slog.Warn("webhook: imported file not found; mount the arr library into VODarr at the same path arr uses",
-			"path", mkvPath, "error", err)
+	if err := strm.FinishImport(mkvPath, sourcePath, outputPath); err != nil {
+		logFinishFailure("webhook", mkvPath, sourcePath, err)
 		h.writeJSON(w, map[string]string{"status": "ok"})
 		return
 	}
-
-	// Safety: the webhook is unauthenticated and arr reports the *library*
-	// path, which lies outside output.path, so containment cannot be the
-	// guard. Instead only ever touch a file that is one of VODarr's own
-	// stubs; a real video is never deleted or shadowed by a .strm.
-	if !isVODarrStub(mkvPath) {
-		slog.Warn("webhook: imported file is not a VODarr stub, leaving it", "path", mkvPath)
-		h.writeJSON(w, map[string]string{"status": "ok"})
-		return
-	}
-
-	// Put the .strm next to the imported file ourselves, copied from the
-	// one VODarr wrote beside the source stub. arr must NOT import it as an
-	// extra file: arr deletes a file's extras whenever that file is deleted
-	// or found missing on a rescan, which would take the .strm along with
-	// the stub. A .strm arr does not know about is left alone.
-	strmPath := strings.TrimSuffix(mkvPath, ".mkv") + ".strm"
-	h.cfgMu.RLock()
-	outputPath := h.cfg.Output.Path
-	h.cfgMu.RUnlock()
-	if src := sourceStrm(sourcePath, outputPath); src != "" {
-		if data, err := os.ReadFile(src); err != nil {
-			slog.Error("webhook: failed to read source .strm", "path", src, "error", err)
-		} else if err := os.WriteFile(strmPath, data, 0644); err != nil {
-			slog.Error("webhook: failed to write library .strm", "path", strmPath, "error", err)
-		} else {
-			slog.Info("webhook: placed .strm in library", "path", strmPath)
-		}
-	}
-
-	// Never leave the episode with nothing playable.
-	if _, err := os.Stat(strmPath); err != nil {
-		slog.Warn("webhook: no .strm next to imported stub, keeping stub", "mkv", mkvPath, "source", sourcePath)
-		h.writeJSON(w, map[string]string{"status": "ok"})
-		return
-	}
-
-	if err := os.Remove(mkvPath); err != nil {
-		slog.Error("webhook: failed to remove mkv stub", "path", mkvPath, "error", err)
-		h.writeJSON(w, map[string]string{"status": "ok"})
-		return
-	}
-	slog.Info("webhook: removed mkv stub after import", "path", mkvPath)
+	slog.Info("webhook: placed .strm and removed mkv stub", "path", mkvPath)
 
 	// Tell arr straight away instead of leaving the deleted .mkv listed until
 	// its next scheduled refresh.
@@ -840,6 +789,25 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, map[string]string{"status": "ok"})
 }
 
+// logFinishFailure explains why an import could not be finished, with the
+// fix for the common causes.
+func logFinishFailure(source, mkvPath, sourcePath string, err error) {
+	switch {
+	case errors.Is(err, strm.ErrNotVisible):
+		slog.Warn(source+": imported file not found; mount the arr library into VODarr at the same path arr uses",
+			"path", mkvPath)
+	case errors.Is(err, strm.ErrGone):
+		slog.Info(source+": imported file already gone, nothing to do", "path", mkvPath)
+	case errors.Is(err, strm.ErrNotStub):
+		slog.Warn(source+": imported file is not a VODarr stub, leaving it", "path", mkvPath)
+	case errors.Is(err, strm.ErrNoStrm):
+		slog.Warn(source+": no .strm for the imported stub, keeping stub; arr and VODarr must see VODarr's output folder at the same path",
+			"mkv", mkvPath, "source", sourcePath)
+	default:
+		slog.Error(source+": could not finish import", "path", mkvPath, "error", err)
+	}
+}
+
 // hasExtension reports whether a comma-separated arr extension list (e.g.
 // "srt,.nfo, strm") contains ext.
 func hasExtension(list, ext string) bool {
@@ -862,42 +830,6 @@ func removeExtension(list, ext string) string {
 		kept = append(kept, t)
 	}
 	return strings.Join(kept, ",")
-}
-
-// sourceStrm returns the .strm VODarr wrote beside the source stub arr
-// imported from, or "" if there is none. It must lie inside output.path.
-func sourceStrm(sourcePath, outputPath string) string {
-	if sourcePath == "" || outputPath == "" || !filepath.IsAbs(sourcePath) || !strings.HasSuffix(sourcePath, ".mkv") {
-		return ""
-	}
-	src := filepath.Clean(strings.TrimSuffix(sourcePath, ".mkv") + ".strm")
-	absOutput, err := filepath.Abs(outputPath)
-	if err != nil {
-		return ""
-	}
-	sep := string(filepath.Separator)
-	if !strings.HasPrefix(src+sep, absOutput+sep) {
-		return ""
-	}
-	if _, err := os.Stat(src); err != nil {
-		return ""
-	}
-	return src
-}
-
-// isVODarrStub reports whether path is an .mkv stub written by strm.Writer:
-// a Matroska header whose muxing/writing app is "vodarr", followed by
-// padding. Real media files never carry that marker.
-func isVODarrStub(path string) bool {
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	head := make([]byte, 4096)
-	n, _ := io.ReadFull(f, head)
-	head = head[:n]
-	return bytes.HasPrefix(head, []byte{0x1A, 0x45, 0xDF, 0xA3}) && bytes.Contains(head, []byte("vodarr"))
 }
 
 // arrInstanceStatus is the per-instance result from GET /api/arr/status.

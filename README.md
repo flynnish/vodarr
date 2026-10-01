@@ -63,6 +63,8 @@ VODarr writes `.strm` files to the configured `output.path`. Sonarr, Radarr, and
 
 For the post-import step, VODarr also needs your Sonarr/Radarr **library** folders mounted at the same paths arr uses. After each import, the webhook copies the `.strm` next to the imported file in the library and deletes the `.mkv` stub, so the `.strm` becomes the episode or movie for Jellyfin. It only ever deletes VODarr's own stubs, never real videos.
 
+If VODarr logs `imported file not found; mount the arr library into VODarr at the same path arr uses`, copy the library line from Sonarr's/Radarr's `volumes:` (e.g. `- /mnt/media/tv/strm:/media/tv/strm`) into VODarr's. Imports the webhook could not finish are not retried by arr; once the mount is fixed, **Settings → Arr Integration → Repair past imports** finishes them from Sonarr/Radarr's import history (it is safe to run repeatedly and never touches real videos). With the instances configured, VODarr also unmonitors and rescans each finished item so arr shows it at once (`arr.unmonitor_delivered`, default true).
+
 Do **not** list `strm` under **Settings → Media Management → Import Extra Files** in arr: arr deletes a file's extras whenever that file is deleted or found missing, so it would remove the `.strm` along with the stub. Auto-configure removes it for you. Turning on **Unmonitor Deleted Episodes/Movies** in the same settings page stops arr from searching again once it notices the stub is gone.
 
 ## ⚠️ Security — credentials in `.strm` files

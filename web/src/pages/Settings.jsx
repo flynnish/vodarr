@@ -111,6 +111,59 @@ function TestButton({ onClick, loading, success, error }) {
   )
 }
 
+// RepairImports finishes past imports the webhook never handled: it places
+// the .strm in the library and removes the .mkv stub for each VODarr import
+// in Sonarr/Radarr's history. Safe to run repeatedly.
+function RepairImports() {
+  const [state, setState] = useState({ loading: false, results: null, error: null })
+
+  const run = async () => {
+    setState({ loading: true, results: null, error: null })
+    try {
+      const res = await fetch('/api/arr/repair', { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+      setState({ loading: false, results: data.results, error: null })
+    } catch (e) {
+      setState({ loading: false, results: null, error: e.message })
+    }
+  }
+
+  return (
+    <div className="border-t border-void-600 pt-4 space-y-2">
+      <p className="font-mono text-[11px] text-steel-500">
+        Repair past imports: for every VODarr import in Sonarr/Radarr's history that still has its .mkv stub (because the
+        webhook missed it or couldn't see the library), place the .strm, remove the stub, then unmonitor and rescan it.
+        Safe to run more than once. Save and restart first if you just added an instance.
+      </p>
+      <div className="flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={run}
+          disabled={state.loading}
+          className="px-4 py-1.5 bg-void-600 border border-void-500 text-steel-400 rounded font-mono text-[12px] hover:bg-void-500 hover:text-steel-300 transition-all disabled:opacity-40"
+        >
+          {state.loading ? 'Repairing…' : 'Repair past imports'}
+        </button>
+        {state.error && <span className="font-mono text-[12px] text-red-400">{state.error}</span>}
+      </div>
+      {state.results && state.results.map(r => (
+        <div key={r.instance} className="font-mono text-[11px] text-steel-400">
+          <span className="text-steel-300">{r.instance}:</span>{' '}
+          {r.error ? <span className="text-red-400">{r.error}</span> : (
+            <>
+              <span className="text-lime-400">{r.repaired} repaired</span> · {r.done} already done
+              {r.not_visible > 0 && <span className="text-amber-400"> · {r.not_visible} not visible (library not mounted into VODarr at arr's path)</span>}
+              {r.no_strm > 0 && <span className="text-amber-400"> · {r.no_strm} without a .strm (VODarr's output folder path differs between containers)</span>}
+              {r.failed > 0 && <span className="text-red-400"> · {r.failed} failed (see log)</span>}
+            </>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // ProviderGroups lists the provider's categories so whole groups (e.g. every
 // Spanish one) can be left out of the index. It saves on its own, outside
 // the main config form, and needs no restart.
@@ -731,6 +784,7 @@ export default function Settings() {
             >
               + Add Instance
             </button>
+            <RepairImports />
           </Section>
         </div>
 
