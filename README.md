@@ -61,6 +61,10 @@ In Sonarr/Radarr → Settings → Connect → add a Webhook pointing to `http://
 
 VODarr writes `.strm` files to the configured `output.path`. Sonarr, Radarr, and Jellyfin all need read access to that same directory. When running via Docker, mount the same volume path in all containers.
 
+For the post-import step, VODarr also needs your Sonarr/Radarr **library** folders mounted at the same paths arr uses. After each import, the webhook copies the `.strm` next to the imported file in the library and deletes the `.mkv` stub, so the `.strm` becomes the episode or movie for Jellyfin. It only ever deletes VODarr's own stubs, never real videos.
+
+Do **not** list `strm` under **Settings → Media Management → Import Extra Files** in arr: arr deletes a file's extras whenever that file is deleted or found missing, so it would remove the `.strm` along with the stub. Auto-configure removes it for you. Turning on **Unmonitor Deleted Episodes/Movies** in the same settings page stops arr from searching again once it notices the stub is gone.
+
 ## ⚠️ Security — credentials in `.strm` files
 
 Every `.strm` file contains your Xtream username and password in the stream URL:
@@ -103,7 +107,7 @@ output:
 
 sync:
   interval: "6h"                      # Go duration: 1h, 6h, 24h, etc.
-  on_startup: true
+  on_startup: true                    # Sync on start, unless the cached index is younger than one interval
   parallelism: 10                     # Concurrent workers for TMDB enrichment (1–20)
   grace_cycles: 3                     # Syncs to retain items missing from provider before removing (0 = immediate)
   # title_cleanup_patterns:           # Regex patterns stripped from stream names before TMDB search
@@ -141,6 +145,24 @@ logging:
 ## Dashboard & monitoring
 
 The web UI dashboard shows live sync statistics including total items, unenriched count, grace-retained items, last expired items, and the duration of the most recent sync. A **Sync History** table lists the last 20 sync runs with per-run counts, refreshed automatically every 5 seconds.
+
+## Automatic searching
+
+Sonarr and Radarr only grab on their own through RSS sync, which shows an indexer's *recent* releases. An IPTV catalog is not a stream of new releases, so RSS never surfaces most of it, and a "Refresh" in arr never searches. Instead, after every sync VODarr asks each configured arr instance (the `arr.instances` in config) for its **wanted/missing** list, keeps only the episodes and movies VODarr actually has, and starts a search for exactly those. Items already searched are not asked for again for 24 hours, so a release arr rejects is not searched over and over.
+
+Disable with `arr.auto_search: false`. Ticking **Start search for missing** when adding a series or movie in arr still gives you an immediate search, without waiting for the next sync.
+
+## Excluding provider groups
+
+Providers often carry the same show or movie in several language groups (e.g. `EN | Series` and `ES | Series`). To stop Sonarr/Radarr from ever being handed a stream from a group you don't want, open **Settings → Provider Groups**, load the group list, and untick the groups to leave out. The filter box plus **Exclude all shown** makes it quick to drop every group matching, say, `ES`.
+
+Saving takes effect at once: items from excluded groups disappear from searches immediately, with no restart. They are left out of every later sync without going through the grace period, and VODarr does not delete any files for them. The choice is stored in `config.yml` as `sync.excluded_categories`.
+
+## Manual matching
+
+If a title is matched to the wrong show or movie (or not matched at all), open **Content**, find it, and click **Fix match**. Search TMDB and pick the right entry, or type a TMDB ID directly. For series you can also set the **TVDB ID**, which is what Sonarr searches by, for shows TMDB has no TVDB link for.
+
+A manual match applies immediately and is kept across every sync and restart. It is stored in `matches.json` next to `config.yml`. **Reset to automatic** removes it and re-runs normal matching.
 
 ## Grace period for provider outages
 

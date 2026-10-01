@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/vodarr/vodarr/internal/arr"
 	"github.com/vodarr/vodarr/internal/config"
 	"github.com/vodarr/vodarr/internal/download"
 	"github.com/vodarr/vodarr/internal/index"
@@ -72,6 +74,26 @@ func main() {
 	qbitStore := qbit.NewStore()
 
 	scheduler := vodarrsync.NewScheduler(cfg, xc, tc, idx, strmWriter)
+	// Manual matches live next to config.yml, which is on a mounted volume.
+	if err := scheduler.LoadOverrides(filepath.Join(filepath.Dir(*configPath), "matches.json")); err != nil {
+		slog.Error("failed to load manual matches", "error", err)
+	}
+	// Sonarr/Radarr only grab by themselves through RSS, which never shows
+	// most of an IPTV catalog: after each sync, ask them to search for the
+	// wanted items VODarr now has.
+	switch {
+	case !cfg.Arr.AutoSearch:
+		slog.Info("arr auto-search disabled (arr.auto_search: false)")
+	case len(cfg.Arr.Instances) == 0:
+		// The import webhook is one-way (arr → VODarr) and carries no API
+		// key, so it is not enough for VODarr to ask arr to search.
+		slog.Warn("arr auto-search inactive: no arr instances configured; add Sonarr/Radarr with URL and API key under Settings → Arr Integration")
+	default:
+		searcher := arr.NewSearcher()
+		scheduler.SetAfterSync(func(ctx context.Context) {
+			searcher.Run(ctx, cfg.Arr.Instances, idx)
+		})
+	}
 
 	// 1B: Use configured external URL; fall back to request Host header (handled in newznab handler)
 	newznabSrvURL := cfg.Server.ExternalURL

@@ -778,3 +778,30 @@ func TestSyncHistoryUnenrichedCount(t *testing.T) {
 		t.Errorf("SyncRun.Unenriched = %d, want 2", h[0].Unenriched)
 	}
 }
+
+func TestFirstSyncDelay(t *testing.T) {
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	interval := 6 * time.Hour
+
+	cases := []struct {
+		name      string
+		onStartup bool
+		lastSync  time.Time
+		items     int
+		want      time.Duration
+	}{
+		{"fresh cache waits until due", true, now.Add(-1 * time.Hour), 100, 5 * time.Hour},
+		{"stale cache syncs now", true, now.Add(-7 * time.Hour), 100, 0},
+		{"no cache syncs now", true, time.Time{}, 0, 0},
+		{"empty cache syncs now", true, now.Add(-1 * time.Hour), 0, 0},
+		{"undated cache syncs now", true, time.Time{}, 100, 0},
+		{"on_startup off waits a full interval", false, now.Add(-7 * time.Hour), 100, interval},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := firstSyncDelay(tc.onStartup, interval, tc.lastSync, tc.items, now); got != tc.want {
+				t.Errorf("firstSyncDelay = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

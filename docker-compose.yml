@@ -12,6 +12,10 @@ services:
     volumes:
       - ./config:/config                     # Mount your config.yml here
       - /mnt/debrid/vodarr-strm:/data/strm  # Where .strm files will be written
+      # Mount your Sonarr/Radarr library folders at the SAME path arr uses, so the
+      # import webhook can delete the .mkv stub next to the imported .strm:
+      # - /mnt/media/tv:/tv
+      # - /mnt/media/movies:/movies
     environment:
       - TZ=UTC
     healthcheck:

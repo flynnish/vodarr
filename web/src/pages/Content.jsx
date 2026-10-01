@@ -13,7 +13,13 @@ function useContent(type) {
       .catch(() => setLoading(false))
   }, [type])
 
-  return { items: data?.items ?? [], total: data?.total ?? 0, loading }
+  // Swap one item in place after a manual match, without refetching.
+  const updateItem = updated => setData(d => d && {
+    ...d,
+    items: d.items.map(i => (i.XtreamID === updated.XtreamID && i.Type === updated.Type ? updated : i)),
+  })
+
+  return { items: data?.items ?? [], total: data?.total ?? 0, loading, updateItem }
 }
 
 function useStatus() {
@@ -32,6 +38,12 @@ function MatchBadge({ item }) {
   const hasTVDB = !!item.TVDBId
   const hasTMDB = !!item.TMDBId
 
+  if (item.manual_match) return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded font-mono text-[10px] bg-violet-400/10 text-violet-300 border border-violet-400/20" title="Matched by hand">
+      <span className="w-1 h-1 rounded-full bg-violet-300" />
+      MANUAL
+    </span>
+  )
   if (hasIMDB || hasTVDB) return (
     <span className="badge-ok inline-flex items-center gap-1 px-2 py-0.5 rounded font-mono text-[10px]">
       <span className="w-1 h-1 rounded-full bg-lime-400" />
@@ -104,7 +116,8 @@ export default function Content({ initialFilter = 'all', onFilterChange }) {
   const syncGen = status?.sync_gen ?? 0
   const graceCycles = status?.grace_cycles ?? 0
 
-  const { items, total, loading } = useContent(tab)
+  const { items, total, loading, updateItem } = useContent(tab)
+  const [fixing, setFixing] = useState(null) // item whose match is being fixed
 
   // Sync external filter changes (e.g. navigation from Dashboard).
   useEffect(() => {
@@ -235,12 +248,13 @@ export default function Content({ initialFilter = 'all', onFilterChange }) {
       {/* Table */}
       <div className="border border-void-600 rounded-lg overflow-hidden animate-fade-up animate-fade-up-4">
         {/* Table header */}
-        <div className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-4 px-4 py-2.5 bg-void-700/50 border-b border-void-600">
+        <div className="grid grid-cols-[1fr_auto_auto_auto_auto_auto] gap-4 px-4 py-2.5 bg-void-700/50 border-b border-void-600">
           <p className="font-mono text-[10px] text-steel-500 uppercase tracking-widest">Title</p>
           <p className="font-mono text-[10px] text-steel-500 uppercase tracking-widest">Year</p>
           <p className="font-mono text-[10px] text-steel-500 uppercase tracking-widest">IDs</p>
           <p className="font-mono text-[10px] text-steel-500 uppercase tracking-widest">Grace</p>
           <p className="font-mono text-[10px] text-steel-500 uppercase tracking-widest">Match</p>
+          <p className="sr-only">Actions</p>
         </div>
 
         {/* Rows */}
@@ -259,7 +273,7 @@ export default function Content({ initialFilter = 'all', onFilterChange }) {
             {pageItems.map((item, i) => (
               <div
                 key={`${item.XtreamID}-${i}`}
-                className="table-row grid grid-cols-[1fr_auto_auto_auto_auto] gap-4 px-4 py-2.5 items-center"
+                className="table-row grid grid-cols-[1fr_auto_auto_auto_auto_auto] gap-4 px-4 py-2.5 items-center"
               >
                 <div className="min-w-0">
                   <p className="font-display font-500 text-[13px] text-steel-300 truncate">
@@ -268,6 +282,11 @@ export default function Content({ initialFilter = 'all', onFilterChange }) {
                   {item.CanonicalName && item.CanonicalName !== item.Name && (
                     <p className="font-mono text-[10px] text-steel-600 truncate mt-0.5">
                       {item.CanonicalName}
+                    </p>
+                  )}
+                  {item.category && (
+                    <p className="font-mono text-[10px] text-steel-500 truncate mt-0.5" title="Provider group">
+                      {item.category}
                     </p>
                   )}
                   <FailReason item={item} />
@@ -286,11 +305,27 @@ export default function Content({ initialFilter = 'all', onFilterChange }) {
                 <div className="flex justify-end">
                   <MatchBadge item={item} />
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setFixing(item)}
+                  className="px-2 py-0.5 border border-void-600 rounded font-mono text-[10px] text-steel-400 hover:text-steel-300 hover:border-void-500 transition-all"
+                >
+                  Fix match
+                </button>
               </div>
             ))}
           </div>
         )}
       </div>
+
+      {fixing && (
+        <MatchDialog
+          item={fixing}
+          type={tab === 'movies' ? 'movie' : 'series'}
+          onClose={() => setFixing(null)}
+          onUpdated={updated => { updateItem(updated); setFixing(null) }}
+        />
+      )}
 
       {/* Pagination */}
       {totalPages > 1 && (
@@ -321,5 +356,181 @@ function PageBtn({ children, disabled, onClick }) {
     >
       {children}
     </button>
+  )
+}
+
+// stripGroupPrefix removes an IPTV group prefix such as "|EN| " or "┃NL┃ "
+// so the search box starts with just the title.
+function stripGroupPrefix(name) {
+  return (name || '').replace(/^\s*[|┃]\s*(?:[^|┃]+[|┃]\s*)+/, '').trim()
+}
+
+// MatchDialog lets the user pick the right TMDB entry for an item (or, for a
+// series, type a TVDB ID), or reset a manual match to automatic matching.
+function MatchDialog({ item, type, onClose, onUpdated }) {
+  const [q, setQ] = useState(stripGroupPrefix(item.Name).replace(/\s*[([]\d{4}[)\]]\s*$/, ''))
+  const [year, setYear] = useState('')
+  const [results, setResults] = useState(null)
+  const [searching, setSearching] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const [tmdbId, setTmdbId] = useState('')
+  const [tvdbId, setTvdbId] = useState('')
+
+  const search = async e => {
+    e?.preventDefault()
+    if (!q.trim()) return
+    setSearching(true)
+    setError(null)
+    try {
+      const params = new URLSearchParams({ type, q: q.trim() })
+      if (year.trim()) params.set('year', year.trim())
+      const res = await fetch(`/api/match/search?${params}`)
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+      setResults(data.results)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setSearching(false)
+    }
+  }
+
+  // Search straight away with the prefilled title.
+  useEffect(() => { search() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const send = async (url, options) => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(url, options)
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+      onUpdated(data.item)
+    } catch (err) {
+      setError(err.message)
+      setBusy(false)
+    }
+  }
+
+  const apply = body => send('/api/match', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type, xtream_id: item.XtreamID, ...body }),
+  })
+
+  const reset = () => send(`/api/match?type=${type}&xtream_id=${item.XtreamID}`, { method: 'DELETE' })
+
+  const input = 'px-3 py-1.5 bg-void-900/40 border border-void-600 rounded font-mono text-[12px] text-steel-300 placeholder-steel-500'
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      onClick={e => { if (e.target === e.currentTarget && !busy) onClose() }}
+    >
+      <div className="w-full max-w-2xl max-h-[90vh] flex flex-col bg-void-800 border border-void-600 rounded-lg overflow-hidden">
+        <div className="px-5 py-3 border-b border-void-600 bg-void-700/40 flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h2 className="font-display font-600 text-sm text-steel-300 uppercase tracking-widest">Fix match</h2>
+            <p className="font-mono text-[11px] text-steel-400 truncate mt-0.5">
+              {item.Name}{item.Year ? ` · ${item.Year}` : ''}{item.category ? ` · ${item.category}` : ''}
+            </p>
+            <p className="font-mono text-[10px] text-steel-500 mt-0.5">
+              Now: {item.CanonicalName || 'unmatched'}
+              {item.TMDBId ? ` · tmdb ${item.TMDBId}` : ''}{item.TVDBId ? ` · tvdb ${item.TVDBId}` : ''}{item.IMDBId ? ` · ${item.IMDBId}` : ''}
+            </p>
+          </div>
+          <button type="button" onClick={onClose} disabled={busy} aria-label="Close" className="font-mono text-[12px] text-steel-500 hover:text-steel-300">✕</button>
+        </div>
+
+        <form onSubmit={search} className="px-5 py-3 flex gap-2 border-b border-void-600">
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Title" className={`flex-1 min-w-0 ${input}`} />
+          <input
+            value={year}
+            onChange={e => setYear(e.target.value.replace(/\D/g, '').slice(0, 4))}
+            placeholder="Year"
+            className={`w-20 ${input}`}
+          />
+          <button type="submit" disabled={searching} className="px-3 py-1.5 bg-void-600 border border-void-500 rounded font-mono text-[12px] text-steel-300 hover:bg-void-500 disabled:opacity-40">
+            {searching ? 'Searching…' : 'Search TMDB'}
+          </button>
+        </form>
+
+        <div className="flex-1 overflow-y-auto divide-y divide-void-600/50">
+          {results === null ? (
+            <p className="px-5 py-6 font-mono text-[11px] text-steel-500">{searching ? 'Searching…' : ''}</p>
+          ) : results.length === 0 ? (
+            <p className="px-5 py-6 font-mono text-[11px] text-steel-500">No TMDB results. Try another title, or enter an ID below.</p>
+          ) : results.map(r => {
+            const current = String(r.id) === item.TMDBId
+            return (
+              <div key={r.id} className="flex gap-3 px-5 py-2.5 items-start">
+                {r.poster
+                  ? <img src={r.poster} alt="" className="w-10 h-14 rounded object-cover flex-none bg-void-700" loading="lazy" />
+                  : <div className="w-10 h-14 rounded flex-none bg-void-700" />}
+                <div className="flex-1 min-w-0">
+                  <p className="font-display text-[13px] text-steel-300">
+                    {r.title} <span className="font-mono text-[11px] text-steel-500">{r.year || '—'}</span>
+                    {r.original_title && r.original_title !== r.title && (
+                      <span className="font-mono text-[10px] text-steel-500"> · {r.original_title}</span>
+                    )}
+                  </p>
+                  <p className="font-mono text-[10px] text-steel-500 line-clamp-2 mt-0.5">{r.overview}</p>
+                  <p className="font-mono text-[10px] text-steel-500 mt-0.5">tmdb {r.id}</p>
+                </div>
+                <button
+                  type="button"
+                  disabled={busy || current}
+                  onClick={() => apply({ tmdb_id: String(r.id) })}
+                  className="flex-none px-3 py-1 bg-lime-400/10 border border-lime-400/30 text-lime-400 rounded font-mono text-[11px] hover:bg-lime-400/20 disabled:opacity-40"
+                >
+                  {current ? 'Current' : 'Use this'}
+                </button>
+              </div>
+            )
+          })}
+        </div>
+
+        <div className="px-5 py-3 border-t border-void-600 space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              value={tmdbId}
+              onChange={e => setTmdbId(e.target.value.replace(/\D/g, ''))}
+              placeholder="TMDB ID"
+              className={`w-28 ${input}`}
+            />
+            {type === 'series' && (
+              <input
+                value={tvdbId}
+                onChange={e => setTvdbId(e.target.value.replace(/\D/g, ''))}
+                placeholder="TVDB ID"
+                title="Sonarr searches by TVDB ID; set it when TMDB has no TVDB link, or the wrong one"
+                className={`w-28 ${input}`}
+              />
+            )}
+            <button
+              type="button"
+              disabled={busy || (!tmdbId && !tvdbId)}
+              onClick={() => apply({ tmdb_id: tmdbId, tvdb_id: tvdbId })}
+              className="px-3 py-1 bg-void-600 border border-void-500 rounded font-mono text-[11px] text-steel-300 hover:bg-void-500 disabled:opacity-40"
+            >
+              Use ID{type === 'series' ? 's' : ''}
+            </button>
+            {item.manual_match && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={reset}
+                className="ml-auto px-3 py-1 border border-void-600 rounded font-mono text-[11px] text-steel-400 hover:text-red-400 disabled:opacity-40"
+              >
+                Reset to automatic
+              </button>
+            )}
+          </div>
+          {error && <p className="font-mono text-[11px] text-red-400">{error}</p>}
+          {busy && <p className="font-mono text-[11px] text-steel-500">Applying…</p>}
+        </div>
+      </div>
+    </div>
   )
 }

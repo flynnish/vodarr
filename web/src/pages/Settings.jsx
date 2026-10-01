@@ -111,6 +111,160 @@ function TestButton({ onClick, loading, success, error }) {
   )
 }
 
+// ProviderGroups lists the provider's categories so whole groups (e.g. every
+// Spanish one) can be left out of the index. It saves on its own, outside
+// the main config form, and needs no restart.
+function ProviderGroups() {
+  const [groups, setGroups] = useState(null)
+  const [excluded, setExcluded] = useState(new Set())
+  const [savedExcluded, setSavedExcluded] = useState(new Set())
+  const [kind, setKind] = useState('movie')
+  const [query, setQuery] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState(null)
+  const [error, setError] = useState(null)
+
+  const load = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/categories')
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+      const ex = new Set(data.categories.filter(c => c.excluded).map(c => c.key))
+      setGroups(data.categories)
+      setExcluded(ex)
+      setSavedExcluded(new Set(ex))
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const shown = (groups || []).filter(g =>
+    g.type === kind && (!query || g.name.toLowerCase().includes(query.toLowerCase())))
+
+  const toggle = key => setExcluded(prev => {
+    const next = new Set(prev)
+    next.has(key) ? next.delete(key) : next.add(key)
+    return next
+  })
+  const setShown = exclude => setExcluded(prev => {
+    const next = new Set(prev)
+    shown.forEach(g => exclude ? next.add(g.key) : next.delete(g.key))
+    return next
+  })
+
+  const dirty = excluded.size !== savedExcluded.size || [...excluded].some(k => !savedExcluded.has(k))
+
+  const save = async () => {
+    setSaving(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await fetch('/api/categories', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ excluded: [...excluded] }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+      setSavedExcluded(new Set(excluded))
+      setMessage(`Saved. ${data.removed} item${data.removed === 1 ? '' : 's'} removed from search now; the next sync applies it fully. Groups you include again come back on the next sync.`)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (!groups) {
+    return (
+      <div className="space-y-3">
+        <p className="font-mono text-[11px] text-steel-500">
+          Exclude provider groups you never want used, e.g. every Spanish group, so a show that exists in several
+          languages is only found in the ones you keep.
+        </p>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={load}
+            disabled={loading}
+            className="px-4 py-1.5 bg-void-600 border border-void-500 text-steel-400 rounded font-mono text-[12px] hover:bg-void-500 hover:text-steel-300 transition-all disabled:opacity-40"
+          >
+            {loading ? 'Loading groups…' : 'Load groups from provider'}
+          </button>
+          {error && <span className="font-mono text-[12px] text-red-400">{error}</span>}
+        </div>
+      </div>
+    )
+  }
+
+  const excludedOfKind = groups.filter(g => g.type === kind && excluded.has(g.key)).length
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        {[{ id: 'movie', label: 'Movies' }, { id: 'series', label: 'Series' }].map(({ id, label }) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setKind(id)}
+            className={[
+              'px-3 py-1 rounded font-mono text-[11px] border transition-all',
+              kind === id ? 'bg-lime-400/10 text-lime-400 border-lime-400/20' : 'text-steel-400 border-void-600 hover:text-steel-300',
+            ].join(' ')}
+          >
+            {label}
+          </button>
+        ))}
+        <input
+          type="text"
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          placeholder="Filter groups, e.g. ES or Spanish"
+          className="flex-1 min-w-[12rem] px-3 py-1 bg-void-800 border border-void-600 rounded font-mono text-[12px] text-steel-300 placeholder-steel-500"
+        />
+      </div>
+      <div className="flex flex-wrap items-center gap-3 font-mono text-[11px] text-steel-500">
+        <span>{shown.length} shown · {excludedOfKind} excluded</span>
+        <button type="button" onClick={() => setShown(true)} className="text-steel-400 hover:text-red-400">Exclude all shown</button>
+        <button type="button" onClick={() => setShown(false)} className="text-steel-400 hover:text-lime-400">Include all shown</button>
+      </div>
+      <div className="max-h-80 overflow-y-auto border border-void-600 rounded divide-y divide-void-600/50">
+        {shown.length === 0 ? (
+          <p className="px-3 py-4 font-mono text-[11px] text-steel-500">No groups match.</p>
+        ) : shown.map(g => {
+          const isExcluded = excluded.has(g.key)
+          return (
+            <label key={g.key} className="flex items-center gap-3 px-3 py-1.5 cursor-pointer hover:bg-void-700/40">
+              <input type="checkbox" checked={!isExcluded} onChange={() => toggle(g.key)} className="accent-lime-400" />
+              <span className={`flex-1 min-w-0 truncate font-display text-[13px] ${isExcluded ? 'text-steel-600 line-through' : 'text-steel-300'}`}>
+                {g.name}
+              </span>
+              <span className="font-mono text-[10px] text-steel-500">{isExcluded ? 'excluded' : `${g.count} indexed`}</span>
+            </label>
+          )
+        })}
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={save}
+          disabled={saving || !dirty}
+          className="px-4 py-1.5 bg-lime-400/10 border border-lime-400/30 text-lime-400 rounded font-mono text-[12px] hover:bg-lime-400/20 transition-all disabled:opacity-40"
+        >
+          {saving ? 'Saving…' : 'Save groups'}
+        </button>
+        {message && <span className="font-mono text-[11px] text-lime-400">{message}</span>}
+        {error && <span className="font-mono text-[11px] text-red-400">{error}</span>}
+      </div>
+    </div>
+  )
+}
+
 export default function Settings() {
   const [cfg, setCfg] = useState(DEFAULT)
   const [patternsText, setPatternsText] = useState('')
@@ -209,7 +363,7 @@ export default function Settings() {
   }
 
   const handleArrSetup = async name => {
-    if (!window.confirm(`This will enable Import Extra Files (.strm), register a webhook, indexer, and download client in "${name}". Proceed?`)) return
+    if (!window.confirm(`This will register a webhook, indexer, and download client in "${name}", and remove strm from its Import Extra Files extensions. Proceed?`)) return
     setArrSetupState(s => ({ ...s, [name]: { loading: true, error: null, success: false } }))
     try {
       const res = await fetch('/api/arr/setup', {
@@ -461,11 +615,18 @@ export default function Settings() {
           </Section>
         </div>
 
+        {/* Provider groups */}
+        <div className="animate-fade-up animate-fade-up-1">
+          <Section title="Provider Groups">
+            <ProviderGroups />
+          </Section>
+        </div>
+
         {/* Arr Integration */}
         <div className="animate-fade-up animate-fade-up-2">
           <Section title="Arr Integration">
             <p className="font-mono text-[11px] text-steel-500">
-              Connect Sonarr/Radarr instances. Test the connection first, then use Auto-Configure to register the indexer, download client, webhook, and Import Extra Files in one click.
+              Connect Sonarr/Radarr instances. Test the connection first, then use Auto-Configure to register the indexer, download client and webhook in one click. VODarr places the .strm in your library itself after import, so strm must not be an Import Extra Files extension.
             </p>
             <p className="font-mono text-[11px] text-steel-500/90">
               Auto-Configure usually takes about 30-90 seconds. If Arr is busy validating indexers, it can take up to ~120 seconds.
@@ -476,7 +637,8 @@ export default function Settings() {
               const setupSt = arrSetupState[inst.name] || {}
               const apiOk = statusInst?.reachable === true
               const apiFail = statusInst?.reachable === false
-              const webhookOk = statusInst?.webhookConfigured && statusInst?.importExtraFiles && statusInst?.extraFileExtensions?.includes('strm')
+              const strmIsExtra = statusInst?.importExtraFiles && (statusInst?.extraFileExtensions || '').split(',').some(e => e.trim().replace(/^\./, '').toLowerCase() === 'strm')
+              const webhookOk = statusInst?.webhookConfigured && !strmIsExtra
               const webhookIssues = statusInst && !webhookOk ? (statusInst.issues.filter(i => i !== 'unreachable: ' + (statusInst.issues[0] || ''))) : []
               return (
                 <div key={idx} className="border border-void-600 rounded p-4 space-y-3">

@@ -156,6 +156,30 @@ type Scheduler struct {
 	status  Status
 	syncHistory []SyncRun  // rolling log, capped at syncHistoryCap, protected by mu
 	cancel  context.CancelFunc
+
+	// excluded holds the provider groups left out of the index
+	// ("vod:<id>" / "series:<id>"); protected by mu.
+	excluded map[string]bool
+
+	// overrides holds manual matches keyed by "type:xtreamID", persisted to
+	// overridesPath; protected by overridesMu.
+	overridesMu   gosync.Mutex
+	overrides     map[string]MatchOverride
+	overridesPath string
+
+	// indexEditMu serialises read-modify-write edits of the live index
+	// made outside a sync (manual matches, group exclusion).
+	indexEditMu gosync.Mutex
+
+	// afterSync, when set, runs in the background after each successful sync
+	// (used to ask Sonarr/Radarr to search for what is now available).
+	afterSync func(context.Context)
+}
+
+// SetAfterSync registers fn to run in the background after every successful
+// sync. Call before Start.
+func (s *Scheduler) SetAfterSync(fn func(context.Context)) {
+	s.afterSync = fn
 }
 
 const syncHistoryCap = 365
@@ -186,6 +210,8 @@ func NewScheduler(cfg *config.Config, xc *xtream.Client, tc *tmdb.Client, idx *i
 		writer:       w,
 		userPatterns: patterns,
 		cachePath:    CachePath(cfg.Output.Path),
+		excluded:     categorySet(cfg.Sync.ExcludedCategories),
+		overrides:    make(map[string]MatchOverride),
 	}
 }
 
@@ -197,6 +223,8 @@ func (s *Scheduler) Start(ctx context.Context) {
 
 	// Populate the index from the persisted cache so Newznab returns results
 	// immediately on restart, before the first sync finishes.
+	var lastSync time.Time
+	cachedItems := 0
 	if cached, err := LoadIndexCache(s.cachePath); err != nil {
 		slog.Warn("index cache load failed, starting empty", "error", err)
 	} else if cached != nil {
@@ -206,11 +234,12 @@ func (s *Scheduler) Start(ctx context.Context) {
 			movies, series := s.idx.Counts()
 			slog.Info("loaded index from cache", "movies", movies, "series", series, "cached_at", cached.Timestamp, "sync_gen", s.syncGen)
 		}
-		// Restore sync timestamps so the UI shows correct Last/Next Sync after restart.
+		cachedItems = len(cached.Items)
+		lastSync = cached.LastSync
+		// Restore the last sync time so the UI shows it after restart.
 		if !cached.LastSync.IsZero() {
 			s.mu.Lock()
 			s.status.LastSync = cached.LastSync
-			s.status.NextSync = cached.LastSync.Add(s.cfg.Sync.ParsedInterval)
 			s.mu.Unlock()
 		}
 		if len(cached.SyncHistory) > 0 {
@@ -220,15 +249,38 @@ func (s *Scheduler) Start(ctx context.Context) {
 		}
 	}
 
-	if s.cfg.Sync.OnStartup {
-		go func() {
-			if err := s.Sync(ctx); err != nil {
-				slog.Error("startup sync failed", "error", err)
-			}
-		}()
+	interval := s.cfg.Sync.ParsedInterval
+	delay := firstSyncDelay(s.cfg.Sync.OnStartup, interval, lastSync, cachedItems, time.Now())
+	if s.cfg.Sync.OnStartup && delay > 0 {
+		slog.Info("index cache is fresh, skipping startup sync",
+			"last_sync", lastSync, "next_sync_in", delay.Round(time.Second))
 	}
+	s.mu.Lock()
+	s.status.NextSync = time.Now().Add(delay)
+	s.mu.Unlock()
 
-	go s.loop(ctx)
+	go s.loop(ctx, delay)
+}
+
+// firstSyncDelay returns how long to wait before the first sync after start.
+//
+// With on_startup, a restart used to trigger a full sync every time, even
+// seconds after the previous one finished. Now a restart that finds a
+// populated cache younger than one interval waits until that cache is due,
+// exactly as if the process had kept running. An empty or undated cache, or
+// one older than the interval, still syncs immediately. A sync can always be
+// forced from the web UI.
+func firstSyncDelay(onStartup bool, interval time.Duration, lastSync time.Time, cachedItems int, now time.Time) time.Duration {
+	if !onStartup {
+		return interval
+	}
+	if cachedItems == 0 || lastSync.IsZero() {
+		return 0
+	}
+	if remaining := lastSync.Add(interval).Sub(now); remaining > 0 {
+		return remaining
+	}
+	return 0
 }
 
 // Stop stops the scheduler.
@@ -289,7 +341,7 @@ func (s *Scheduler) Sync(ctx context.Context) error {
 		s.mu.Unlock()
 	}()
 
-	items, err := s.fetchAll(ctx)
+	items, excludedKeys, err := s.fetchAll(ctx)
 	if err != nil {
 		errMsg := err.Error()
 		s.mu.Lock()
@@ -361,6 +413,12 @@ func (s *Scheduler) Sync(ctx context.Context) error {
 				// Item is present in this sync — already in enriched list.
 				continue
 			}
+			if excludedKeys[key] || s.isExcluded(ci) {
+				// Left out on purpose, not missing: drop it from the index
+				// without a grace period and without touching files on disk
+				// (an excluded copy can share a folder with a kept one).
+				continue
+			}
 			// Item is missing from this sync.
 			if ci.MissingSince == 0 {
 				ci.MissingSince = s.syncGen
@@ -387,6 +445,10 @@ func (s *Scheduler) Sync(ctx context.Context) error {
 			s.cleanupExpired(expired)
 		}
 	}
+
+	// A manual match set while this sync was running may have been
+	// overwritten by an enrichment that started before it; re-apply.
+	s.reapplyOverrides(ctx, merged)
 
 	s.idx.Replace(merged)
 	movies, series := s.idx.Counts()
@@ -445,6 +507,14 @@ func (s *Scheduler) Sync(ctx context.Context) error {
 			"heap_mb", msAfter.HeapAlloc/(1<<20), "sys_mb", msAfter.Sys/(1<<20))
 	}
 
+	if s.afterSync != nil {
+		go func() {
+			hookCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+			defer cancel()
+			s.afterSync(hookCtx)
+		}()
+	}
+
 	return nil
 }
 
@@ -489,37 +559,56 @@ func (s *Scheduler) setRunning(running bool, errMsg string) {
 	s.mu.Unlock()
 }
 
-func (s *Scheduler) loop(ctx context.Context) {
-	ticker := time.NewTicker(s.cfg.Sync.ParsedInterval)
-	defer ticker.Stop()
+// loop runs the first sync after firstDelay, then one every interval.
+func (s *Scheduler) loop(ctx context.Context, firstDelay time.Duration) {
+	timer := time.NewTimer(firstDelay)
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			if err := s.Sync(ctx); err != nil {
 				slog.Error("scheduled sync failed", "error", err)
 			}
+			timer.Reset(s.cfg.Sync.ParsedInterval)
 		}
 	}
 }
 
 // fetchAll retrieves the full VOD + series catalog from Xtream.
-func (s *Scheduler) fetchAll(ctx context.Context) ([]*index.Item, error) {
-	var items []*index.Item
+//
+// Items in an excluded provider group are left out; their "type:id" keys
+// are returned in excluded so the grace period does not keep them alive.
+func (s *Scheduler) fetchAll(ctx context.Context) (items []*index.Item, excluded map[string]bool, err error) {
+	excluded = make(map[string]bool)
+	excludedCats := s.excludedCategories()
+
+	// Group names are only for display; a failure here is not fatal.
+	vodCats := s.categoryNames(ctx, s.xtream.GetVODCategories)
+	seriesCats := s.categoryNames(ctx, s.xtream.GetSeriesCategories)
 
 	// --- VOD ---
 	s.setProgress("Fetching VOD catalog", 0, 0)
-	streams, err := s.xtream.GetVODStreams(ctx, "")
+	allStreams, err := s.xtream.GetVODStreams(ctx, "")
 	if err != nil {
-		return nil, fmt.Errorf("get vod streams: %w", err)
+		return nil, nil, fmt.Errorf("get vod streams: %w", err)
 	}
-	slog.Debug("fetched vod streams", "count", len(streams))
+	slog.Debug("fetched vod streams", "count", len(allStreams))
+
+	streams := allStreams[:0:0]
+	for _, st := range allStreams {
+		if excludedCats[vodCategoryKey(st.CategoryID)] {
+			excluded[fmt.Sprintf("%s:%d", index.TypeMovie, st.ID.Int())] = true
+			continue
+		}
+		streams = append(streams, st)
+	}
 
 	for i, st := range streams {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		}
 		s.setProgress("Fetching VOD catalog", i+1, len(streams))
 
@@ -541,20 +630,36 @@ func (s *Scheduler) fetchAll(ctx context.Context) ([]*index.Item, error) {
 			ReleaseDate:  st.ReleaseDate,
 			ContainerExt: st.ContainerExt,
 			Duration:     parseDuration(st.Duration),
+			CategoryKey:  vodCategoryKey(st.CategoryID),
+			Category:     vodCats[st.CategoryID],
 		}
 		if st.TMDBId.Int() > 0 {
 			item.TMDBId = strconv.Itoa(st.TMDBId.Int())
+			item.ProviderTMDBId = item.TMDBId
 		}
 		items = append(items, item)
 	}
 
 	// --- Series ---
 	s.setProgress("Fetching series catalog", 0, 0)
-	series, err := s.xtream.GetSeries(ctx, "")
+	allSeries, err := s.xtream.GetSeries(ctx, "")
 	if err != nil {
-		return nil, fmt.Errorf("get series: %w", err)
+		return nil, nil, fmt.Errorf("get series: %w", err)
 	}
-	slog.Debug("fetched series", "count", len(series))
+	slog.Debug("fetched series", "count", len(allSeries))
+
+	// Drop excluded groups before fetching episode lists for them.
+	series := allSeries[:0:0]
+	for _, sr := range allSeries {
+		if excludedCats[seriesCategoryKey(sr.CategoryID)] {
+			excluded[fmt.Sprintf("%s:%d", index.TypeSeries, sr.SeriesID.Int())] = true
+			continue
+		}
+		series = append(series, sr)
+	}
+	if len(excluded) > 0 {
+		slog.Info("excluded provider groups", "items_skipped", len(excluded))
+	}
 
 	// Build a lastModified lookup from the bulk response.
 	lastModifiedByID := make(map[int]string, len(series))
@@ -665,15 +770,19 @@ func (s *Scheduler) fetchAll(ctx context.Context) ([]*index.Item, error) {
 	wg.Wait()
 
 	if ctx.Err() != nil {
-		return nil, ctx.Err()
+		return nil, nil, ctx.Err()
 	}
 
 	// Merge skipped + fetched in original bulk order.
 	for _, sr := range series {
 		id := sr.SeriesID.Int()
-		if item, ok := skippedItems[id]; ok {
-			items = append(items, item)
-		} else if item, ok := fetchedItems[id]; ok {
+		item, ok := skippedItems[id]
+		if !ok {
+			item, ok = fetchedItems[id]
+		}
+		if ok {
+			item.CategoryKey = seriesCategoryKey(sr.CategoryID)
+			item.Category = seriesCats[sr.CategoryID]
 			items = append(items, item)
 		}
 	}
@@ -712,7 +821,7 @@ func (s *Scheduler) fetchAll(ctx context.Context) ([]*index.Item, error) {
 		slog.Warn("snapshot save failed", "error", err)
 	}
 
-	return items, nil
+	return items, excluded, nil
 }
 
 // buildSeriesItem constructs a series index.Item from bulk Xtream metadata
@@ -735,6 +844,7 @@ func buildSeriesItem(sr xtream.Series) *index.Item {
 	}
 	if sr.TMDBId.Int() > 0 {
 		item.TMDBId = strconv.Itoa(sr.TMDBId.Int())
+		item.ProviderTMDBId = item.TMDBId
 	}
 	return item
 }
@@ -783,13 +893,31 @@ func (s *Scheduler) enrich(ctx context.Context, items []*index.Item, cachedByKey
 					return
 				}
 
+				// A manual match always wins over automatic matching.
+				if ov, ok := s.override(itemKey(item.Type, item.XtreamID)); ok {
+					if err := s.applyOverride(ctx, item, ov); err != nil {
+						errMu.Lock()
+						lastErr = err
+						errMu.Unlock()
+					}
+					n := atomic.AddInt64(&progressN, 1)
+					s.setProgress("Enriching via TMDB", int(n), total)
+					continue
+				}
+
 				// Reuse cached IDs for unchanged items to avoid redundant TMDB calls.
 				// Always copy IDs from cache to preserve them even if a fresh title
 				// search later fails. Skip enrichment only when CanonicalName is
 				// also set — items cached before that feature get re-enriched once.
 				if cachedByKey != nil {
 					key := fmt.Sprintf("%s:%d", item.Type, item.XtreamID)
-					if ci, ok := cachedByKey[key]; ok && ci.Name == item.Name {
+					// Items matched by title under an older algorithm are
+					// re-enriched from scratch so a wrong cached ID can be
+					// corrected. Items the provider tags with a TMDB ID never
+					// went through title matching, so they keep their cache.
+					ci, ok := cachedByKey[key]
+					stale := ok && item.TMDBId == "" && ci.MatchVersion < matchVersion
+					if ok && ci.Name == item.Name && !stale {
 						if ci.IMDBId != "" || ci.TVDBId != "" {
 							item.IMDBId = ci.IMDBId
 							item.TVDBId = ci.TVDBId
@@ -981,6 +1109,8 @@ func (s *Scheduler) enrich(ctx context.Context, items []*index.Item, cachedByKey
 				}
 			}
 
+			item.MatchVersion = matchVersion
+
 			// Determine enrichment failure reason from the item's final state,
 			// after all fallback stages have completed. Setting this at
 			// intermediate failure points would be incorrect because a later
@@ -1027,16 +1157,10 @@ func (s *Scheduler) resolveByTitle(ctx context.Context, item *index.Item) error 
 
 	switch item.Type {
 	case index.TypeMovie:
-		result, err := s.tmdb.SearchMovie(ctx, title, year)
+		// searchTMDBMovie also searches without the year, so no year-retry here.
+		result, err := s.searchTMDBMovie(ctx, title, year, item.Duration)
 		if err != nil {
 			return err
-		}
-		// Year-retry: provider year may be off by 1; retry without year constraint.
-		if result == nil && year > 0 {
-			result, err = s.tmdb.SearchMovie(ctx, title, 0)
-			if err != nil {
-				return err
-			}
 		}
 		if result != nil {
 			item.TMDBId = strconv.Itoa(result.ID)
@@ -1051,16 +1175,10 @@ func (s *Scheduler) resolveByTitle(ctx context.Context, item *index.Item) error 
 			}
 		}
 	case index.TypeSeries:
-		result, err := s.tmdb.SearchTV(ctx, title, year)
+		// searchTMDBSeries also searches without the year, so no year-retry here.
+		result, err := s.searchTMDBSeries(ctx, title, year, maxSeason(item))
 		if err != nil {
 			return err
-		}
-		// Year-retry: provider year may be off by 1; retry without year constraint.
-		if result == nil && year > 0 {
-			result, err = s.tmdb.SearchTV(ctx, title, 0)
-			if err != nil {
-				return err
-			}
 		}
 		if result != nil {
 			item.TMDBId = strconv.Itoa(result.ID)
@@ -1082,7 +1200,8 @@ func (s *Scheduler) resolveByTitle(ctx context.Context, item *index.Item) error 
 // TMDB enrichment could not resolve.
 func (s *Scheduler) resolveByTVDB(ctx context.Context, item *index.Item) error {
 	title := cleanTitleForSearch(item.Name, s.userPatterns)
-	result, err := s.tvdb.SearchSeries(ctx, title)
+	year, _ := strconv.Atoi(item.Year)
+	result, err := s.searchTVDBSeries(ctx, title, year)
 	if err != nil {
 		return err
 	}

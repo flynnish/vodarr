@@ -132,6 +132,11 @@ func (h *Handler) registerRoutes(staticFS fs.FS) {
 	h.mux.HandleFunc("GET /api/sync/history", auth(h.handleSyncHistory))
 	h.mux.HandleFunc("GET /api/logs/download", auth(h.handleLogsDownload))
 	h.mux.HandleFunc("GET /api/update", auth(h.handleGetUpdate))
+	h.mux.HandleFunc("GET /api/categories", auth(h.handleGetCategories))
+	h.mux.HandleFunc("PUT /api/categories", auth(h.handlePutCategories))
+	h.mux.HandleFunc("GET /api/match/search", auth(h.handleMatchSearch))
+	h.mux.HandleFunc("PUT /api/match", auth(h.handlePutMatch))
+	h.mux.HandleFunc("DELETE /api/match", auth(h.handleDeleteMatch))
 
 	// Serve embedded static frontend; fall back to index.html for SPA routing
 	if staticFS != nil {
@@ -684,10 +689,12 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
 		EventType   string `json:"eventType"`
 		EpisodeFile struct {
-			Path string `json:"path"`
+			Path       string `json:"path"`
+			SourcePath string `json:"sourcePath"`
 		} `json:"episodeFile"`
 		MovieFile struct {
-			Path string `json:"path"`
+			Path       string `json:"path"`
+			SourcePath string `json:"sourcePath"`
 		} `json:"movieFile"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -708,10 +715,11 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine which path field was populated
-	mkvPath := payload.EpisodeFile.Path
+	// Determine which path field was populated. Path is where arr imported
+	// the stub into the library; SourcePath is the stub VODarr wrote.
+	mkvPath, sourcePath := payload.EpisodeFile.Path, payload.EpisodeFile.SourcePath
 	if mkvPath == "" {
-		mkvPath = payload.MovieFile.Path
+		mkvPath, sourcePath = payload.MovieFile.Path, payload.MovieFile.SourcePath
 	}
 	if mkvPath == "" || !strings.HasSuffix(mkvPath, ".mkv") {
 		h.writeJSON(w, map[string]string{"status": "ok"})
@@ -725,25 +733,56 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Safety: path must be contained within the configured output directory
+	// Download mode imports real media; there are no stubs to clean up.
+	h.cfgMu.RLock()
+	mode := h.cfg.Output.Mode
+	h.cfgMu.RUnlock()
+	if mode == "download" {
+		h.writeJSON(w, map[string]string{"status": "ok"})
+		return
+	}
+
+	if _, err := os.Stat(mkvPath); err != nil {
+		// Most often the library is not mounted into the VODarr container at
+		// the same path arr sees it, so the file is invisible from here.
+		slog.Warn("webhook: imported file not found; mount the arr library into VODarr at the same path arr uses",
+			"path", mkvPath, "error", err)
+		h.writeJSON(w, map[string]string{"status": "ok"})
+		return
+	}
+
+	// Safety: the webhook is unauthenticated and arr reports the *library*
+	// path, which lies outside output.path, so containment cannot be the
+	// guard. Instead only ever touch a file that is one of VODarr's own
+	// stubs; a real video is never deleted or shadowed by a .strm.
+	if !isVODarrStub(mkvPath) {
+		slog.Warn("webhook: imported file is not a VODarr stub, leaving it", "path", mkvPath)
+		h.writeJSON(w, map[string]string{"status": "ok"})
+		return
+	}
+
+	// Put the .strm next to the imported file ourselves, copied from the
+	// one VODarr wrote beside the source stub. arr must NOT import it as an
+	// extra file: arr deletes a file's extras whenever that file is deleted
+	// or found missing on a rescan, which would take the .strm along with
+	// the stub. A .strm arr does not know about is left alone.
+	strmPath := strings.TrimSuffix(mkvPath, ".mkv") + ".strm"
 	h.cfgMu.RLock()
 	outputPath := h.cfg.Output.Path
 	h.cfgMu.RUnlock()
-	if outputPath != "" {
-		absPath, _ := filepath.Abs(mkvPath)
-		absOutput, _ := filepath.Abs(outputPath)
-		sep := string(filepath.Separator)
-		if !strings.HasPrefix(absPath+sep, absOutput+sep) {
-			slog.Warn("webhook: path outside output directory, ignoring", "path", mkvPath)
-			h.writeJSON(w, map[string]string{"status": "ok"})
-			return
+	if src := sourceStrm(sourcePath, outputPath); src != "" {
+		if data, err := os.ReadFile(src); err != nil {
+			slog.Error("webhook: failed to read source .strm", "path", src, "error", err)
+		} else if err := os.WriteFile(strmPath, data, 0644); err != nil {
+			slog.Error("webhook: failed to write library .strm", "path", strmPath, "error", err)
+		} else {
+			slog.Info("webhook: placed .strm in library", "path", strmPath)
 		}
 	}
 
-	// Only delete if a .strm sibling exists (confirms VODarr managed this download)
-	strmPath := strings.TrimSuffix(mkvPath, ".mkv") + ".strm"
-	if _, err := os.Stat(strmPath); os.IsNotExist(err) {
-		slog.Debug("webhook: no .strm sibling, skipping delete", "mkv", mkvPath)
+	// Never leave the episode with nothing playable.
+	if _, err := os.Stat(strmPath); err != nil {
+		slog.Warn("webhook: no .strm next to imported stub, keeping stub", "mkv", mkvPath, "source", sourcePath)
 		h.writeJSON(w, map[string]string{"status": "ok"})
 		return
 	}
@@ -754,6 +793,66 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		slog.Info("webhook: removed mkv stub after import", "path", mkvPath)
 	}
 	h.writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// hasExtension reports whether a comma-separated arr extension list (e.g.
+// "srt,.nfo, strm") contains ext.
+func hasExtension(list, ext string) bool {
+	for _, e := range strings.Split(list, ",") {
+		if strings.EqualFold(strings.TrimPrefix(strings.TrimSpace(e), "."), ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// removeExtension drops ext from a comma-separated arr extension list.
+func removeExtension(list, ext string) string {
+	var kept []string
+	for _, e := range strings.Split(list, ",") {
+		t := strings.TrimSpace(e)
+		if t == "" || strings.EqualFold(strings.TrimPrefix(t, "."), ext) {
+			continue
+		}
+		kept = append(kept, t)
+	}
+	return strings.Join(kept, ",")
+}
+
+// sourceStrm returns the .strm VODarr wrote beside the source stub arr
+// imported from, or "" if there is none. It must lie inside output.path.
+func sourceStrm(sourcePath, outputPath string) string {
+	if sourcePath == "" || outputPath == "" || !filepath.IsAbs(sourcePath) || !strings.HasSuffix(sourcePath, ".mkv") {
+		return ""
+	}
+	src := filepath.Clean(strings.TrimSuffix(sourcePath, ".mkv") + ".strm")
+	absOutput, err := filepath.Abs(outputPath)
+	if err != nil {
+		return ""
+	}
+	sep := string(filepath.Separator)
+	if !strings.HasPrefix(src+sep, absOutput+sep) {
+		return ""
+	}
+	if _, err := os.Stat(src); err != nil {
+		return ""
+	}
+	return src
+}
+
+// isVODarrStub reports whether path is an .mkv stub written by strm.Writer:
+// a Matroska header whose muxing/writing app is "vodarr", followed by
+// padding. Real media files never carry that marker.
+func isVODarrStub(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	head := make([]byte, 4096)
+	n, _ := io.ReadFull(f, head)
+	head = head[:n]
+	return bytes.HasPrefix(head, []byte{0x1A, 0x45, 0xDF, 0xA3}) && bytes.Contains(head, []byte("vodarr"))
 }
 
 // arrInstanceStatus is the per-instance result from GET /api/arr/status.
@@ -806,11 +905,10 @@ func (h *Handler) checkArrInstance(ctx context.Context, inst config.ArrInstance,
 	if err := json.NewDecoder(mmResp.Body).Decode(&mm); err == nil {
 		st.ImportExtraFiles = mm.ImportExtraFiles
 		st.ExtraFileExts = mm.ExtraFileExtensions
-		if !mm.ImportExtraFiles {
-			st.Issues = append(st.Issues, "importExtraFiles not enabled")
-		}
-		if !strings.Contains(mm.ExtraFileExtensions, "strm") {
-			st.Issues = append(st.Issues, "extraFileExtensions does not include strm")
+		// VODarr places the library .strm itself. If arr also imports it as
+		// an extra file, arr deletes it together with the stub.
+		if mm.ImportExtraFiles && hasExtension(mm.ExtraFileExtensions, "strm") {
+			st.Issues = append(st.Issues, "extraFileExtensions includes strm (arr would delete the .strm with the stub)")
 		}
 	}
 
@@ -983,40 +1081,34 @@ func (h *Handler) handleArrSetup(w http.ResponseWriter, r *http.Request) {
 		return nil, lastErr
 	}
 
-	// Step 1: Configure importExtraFiles
+	// Step 1: Make sure arr does not import .strm as an extra file (see
+	// handleWebhook: arr deletes extras along with their main file).
 	mmURL := fmt.Sprintf("%s/api/v3/config/mediamanagement", baseURL)
 	getReq, _ := http.NewRequestWithContext(r.Context(), "GET", mmURL, nil)
 	getReq.Header.Set("X-Api-Key", inst.APIKey)
 	getResp, err := client.Do(getReq)
 	if err != nil {
-		results["importExtraFiles"] = map[string]interface{}{"success": false, "error": err.Error()}
+		results["extraFileExtensions"] = map[string]interface{}{"success": false, "error": err.Error()}
 	} else {
 		defer getResp.Body.Close()
 		var mm map[string]interface{}
-		if err := json.NewDecoder(getResp.Body).Decode(&mm); err == nil {
-			mm["importExtraFiles"] = true
-			// Append strm to extraFileExtensions if not already there
-			exts, _ := mm["extraFileExtensions"].(string)
-			if !strings.Contains(exts, "strm") {
-				if exts == "" {
-					mm["extraFileExtensions"] = "strm"
-				} else {
-					mm["extraFileExtensions"] = exts + ",strm"
-				}
-			}
+		if err := json.NewDecoder(getResp.Body).Decode(&mm); err != nil {
+			results["extraFileExtensions"] = map[string]interface{}{"success": false, "error": "failed to parse mediamanagement response"}
+		} else if exts, _ := mm["extraFileExtensions"].(string); !hasExtension(exts, "strm") {
+			results["extraFileExtensions"] = map[string]interface{}{"success": true, "skipped": "strm not imported as extra"}
+		} else {
+			mm["extraFileExtensions"] = removeExtension(exts, "strm")
 			body, _ := json.Marshal(mm)
 			putReq, _ := http.NewRequestWithContext(r.Context(), "PUT", mmURL, bytes.NewReader(body))
 			putReq.Header.Set("X-Api-Key", inst.APIKey)
 			putReq.Header.Set("Content-Type", "application/json")
 			putResp, err := client.Do(putReq)
 			if err != nil {
-				results["importExtraFiles"] = map[string]interface{}{"success": false, "error": err.Error()}
+				results["extraFileExtensions"] = map[string]interface{}{"success": false, "error": err.Error()}
 			} else {
 				putResp.Body.Close()
-				results["importExtraFiles"] = map[string]interface{}{"success": putResp.StatusCode < 300}
+				results["extraFileExtensions"] = map[string]interface{}{"success": putResp.StatusCode < 300}
 			}
-		} else {
-			results["importExtraFiles"] = map[string]interface{}{"success": false, "error": "failed to parse mediamanagement response"}
 		}
 	}
 

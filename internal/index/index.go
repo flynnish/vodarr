@@ -59,6 +59,23 @@ type Item struct {
 	// It is determined from the item's final state after all fallback stages complete.
 	EnrichFailReason string `json:"enrich_fail_reason,omitempty"`
 
+	// Category is the provider group (Xtream category) name, and CategoryKey
+	// identifies it as "vod:<id>" or "series:<id>" (the two ID spaces overlap).
+	Category    string `json:"category,omitempty"`
+	CategoryKey string `json:"category_key,omitempty"`
+
+	// ProviderTMDBId is the TMDB ID the provider tagged the item with, kept
+	// so a manual match can be reset to automatic matching.
+	ProviderTMDBId string `json:"provider_tmdb_id,omitempty"`
+
+	// ManualMatch is true when the external IDs come from a user's manual
+	// match rather than automatic title matching.
+	ManualMatch bool `json:"manual_match,omitempty"`
+
+	// MatchVersion records which version of the title matching logic
+	// produced the external IDs, so the sync can redo stale matches.
+	MatchVersion int `json:"match_version,omitempty"`
+
 	// Normalised title used for fuzzy matching (set by index on insert)
 	normalizedTitle string
 }

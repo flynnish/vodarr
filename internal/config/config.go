@@ -24,6 +24,9 @@ type Config struct {
 
 type ArrConfig struct {
 	Instances []ArrInstance `yaml:"instances"`
+	// AutoSearch makes VODarr ask each instance, after every sync, to search
+	// for its wanted items that VODarr has. Default true.
+	AutoSearch bool `yaml:"auto_search"`
 }
 
 type ArrInstance struct {
@@ -64,6 +67,9 @@ type SyncConfig struct {
 	Parallelism          int      `yaml:"parallelism"`
 	GraceCycles          int      `yaml:"grace_cycles"`
 	TitleCleanupPatterns []string `yaml:"title_cleanup_patterns,omitempty"`
+	// ExcludedCategories lists provider groups to leave out of the index, as
+	// "vod:<category_id>" or "series:<category_id>".
+	ExcludedCategories []string `yaml:"excluded_categories,omitempty"`
 
 	// Parsed interval (not from YAML directly)
 	ParsedInterval time.Duration `yaml:"-"`
@@ -183,6 +189,9 @@ func defaults() *Config {
 		},
 		Logging: LoggingConfig{
 			Level: "info",
+		},
+		Arr: ArrConfig{
+			AutoSearch: true,
 		},
 	}
 }

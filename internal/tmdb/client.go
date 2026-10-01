@@ -75,9 +75,11 @@ func (c *Client) Validate(ctx context.Context) error {
 
 // MovieSearchResult is a single result from movie search.
 type MovieSearchResult struct {
-	ID          int    `json:"id"`
-	Title       string `json:"title"`
-	ReleaseDate string `json:"release_date"`
+	ID            int    `json:"id"`
+	Title         string `json:"title"`
+	OriginalTitle string `json:"original_title"`
+	ReleaseDate   string `json:"release_date"`
+	PosterPath    string `json:"poster_path"`
 	Overview    string `json:"overview"`
 }
 
@@ -85,7 +87,9 @@ type MovieSearchResult struct {
 type TVSearchResult struct {
 	ID           int    `json:"id"`
 	Name         string `json:"name"`
+	OriginalName string `json:"original_name"`
 	FirstAirDate string `json:"first_air_date"`
+	PosterPath   string `json:"poster_path"`
 	Overview     string `json:"overview"`
 }
 
@@ -117,12 +121,23 @@ func (c *Client) Stop() {
 // SearchMovie searches for movies by title and optional year.
 // Returns the best match (first result).
 func (c *Client) SearchMovie(ctx context.Context, title string, year int) (*MovieSearchResult, error) {
+	results, err := c.SearchMovieAll(ctx, title, year)
+	if err != nil || len(results) == 0 {
+		return nil, err
+	}
+	return &results[0], nil
+}
+
+// SearchMovieAll searches for movies by title and optional year and returns
+// every result on the first page, in TMDB's relevance order, so callers can
+// tell remakes sharing a title apart.
+func (c *Client) SearchMovieAll(ctx context.Context, title string, year int) ([]MovieSearchResult, error) {
 	key := fmt.Sprintf("search_movie:%s:%d", title, year)
 	if hit, ok := c.cacheGet(key); ok {
 		if hit == nil {
 			return nil, nil
 		}
-		return hit.(*MovieSearchResult), nil
+		return hit.([]MovieSearchResult), nil
 	}
 
 	params := url.Values{
@@ -144,19 +159,31 @@ func (c *Client) SearchMovie(ctx context.Context, title string, year int) (*Movi
 		c.cachePut(key, nil)
 		return nil, nil
 	}
-	result := &resp.Results[0]
-	c.cachePut(key, result)
-	return result, nil
+	c.cachePut(key, resp.Results)
+	return resp.Results, nil
 }
 
 // SearchTV searches for TV shows by title and optional year.
+// Returns the best match (first result).
 func (c *Client) SearchTV(ctx context.Context, title string, year int) (*TVSearchResult, error) {
+	results, err := c.SearchTVAll(ctx, title, year)
+	if err != nil || len(results) == 0 {
+		return nil, err
+	}
+	return &results[0], nil
+}
+
+// SearchTVAll searches for TV shows by title and optional year and returns
+// every result on the first page, in TMDB's relevance order. Callers that
+// need to disambiguate between shows sharing a title (reboots, revivals,
+// spin-offs) pick from this list rather than trusting the first entry.
+func (c *Client) SearchTVAll(ctx context.Context, title string, year int) ([]TVSearchResult, error) {
 	key := fmt.Sprintf("search_tv:%s:%d", title, year)
 	if hit, ok := c.cacheGet(key); ok {
 		if hit == nil {
 			return nil, nil
 		}
-		return hit.(*TVSearchResult), nil
+		return hit.([]TVSearchResult), nil
 	}
 
 	params := url.Values{
@@ -178,9 +205,8 @@ func (c *Client) SearchTV(ctx context.Context, title string, year int) (*TVSearc
 		c.cachePut(key, nil)
 		return nil, nil
 	}
-	result := &resp.Results[0]
-	c.cachePut(key, result)
-	return result, nil
+	c.cachePut(key, resp.Results)
+	return resp.Results, nil
 }
 
 // GetMovieExternalIDs fetches IMDB and other external IDs for a movie.
@@ -293,6 +319,28 @@ func (c *Client) GetTVTitle(ctx context.Context, tmdbID int) (string, error) {
 	}
 	c.cachePut(key, details.Name)
 	return details.Name, nil
+}
+
+// GetTVSeasonCount returns the number of seasons TMDB lists for a TV show,
+// or 0 when unknown. Used to tell apart shows that share a title, e.g. a
+// nine-season original and its one-season revival.
+func (c *Client) GetTVSeasonCount(ctx context.Context, tmdbID int) (int, error) {
+	key := fmt.Sprintf("tv_seasons:%d", tmdbID)
+	if hit, ok := c.cacheGet(key); ok {
+		return hit.(int), nil
+	}
+
+	var details struct {
+		NumberOfSeasons int `json:"number_of_seasons"`
+	}
+	if err := c.get(ctx, fmt.Sprintf("/tv/%d", tmdbID), nil, &details); err != nil {
+		if errors.Is(err, errNotFound) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("tv seasons %d: %w", tmdbID, err)
+	}
+	c.cachePut(key, details.NumberOfSeasons)
+	return details.NumberOfSeasons, nil
 }
 
 func (c *Client) get(ctx context.Context, path string, params url.Values, out interface{}) error {

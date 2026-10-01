@@ -8,10 +8,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/vodarr/vodarr/internal/config"
 	"github.com/vodarr/vodarr/internal/index"
+	"github.com/vodarr/vodarr/internal/strm"
 	"github.com/vodarr/vodarr/internal/update"
 )
 
@@ -437,7 +439,7 @@ func TestWebhookDownloadDeletesMkv(t *testing.T) {
 	strmPath := filepath.Join(dir, "Show S01E01.strm")
 
 	// Create both files
-	if err := os.WriteFile(mkvPath, []byte("fake mkv"), 0644); err != nil {
+	if err := os.WriteFile(mkvPath, strm.BuildMKVHeader(nil), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(strmPath, []byte("http://stream.example.com"), 0644); err != nil {
@@ -711,5 +713,165 @@ func TestGetConfigIncludesUpdateSection(t *testing.T) {
 	}
 	if updateSection["beta_channel"] != true {
 		t.Errorf("update.beta_channel = %v, want true", updateSection["beta_channel"])
+	}
+}
+
+func TestWebhookDeletesStubInLibraryOutsideOutputPath(t *testing.T) {
+	// arr reports the library path, which is not under output.path. The
+	// stub must still be removed, leaving the .strm extra file in place.
+	library := t.TempDir()
+	mkvPath := filepath.Join(library, "Scrubs - S01E01 - My First Day WEBDL-1080p.mkv")
+	strmPath := strings.TrimSuffix(mkvPath, ".mkv") + ".strm"
+	if err := os.WriteFile(mkvPath, strm.BuildMKVHeader(nil), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(strmPath, []byte("http://provider.example.com/series/u/p/1.mkv"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := minimalCfg()
+	cfg.Output.Path = t.TempDir()
+	h := makeHandler(cfg, "")
+	body, _ := json.Marshal(map[string]interface{}{
+		"eventType":   "Download",
+		"episodeFile": map[string]string{"path": mkvPath},
+	})
+	h.handleWebhook(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/webhook", bytes.NewReader(body)))
+
+	if _, err := os.Stat(mkvPath); !os.IsNotExist(err) {
+		t.Error("expected library .mkv stub to be deleted")
+	}
+	if _, err := os.Stat(strmPath); err != nil {
+		t.Errorf("expected .strm to remain: %v", err)
+	}
+}
+
+func TestWebhookKeepsRealVideo(t *testing.T) {
+	// A real video with a .strm beside it must never be deleted: the
+	// webhook is unauthenticated.
+	dir := t.TempDir()
+	mkvPath := filepath.Join(dir, "Real.mkv")
+	real := append([]byte{0x1A, 0x45, 0xDF, 0xA3}, []byte("libebml libmatroska mkvmerge")...)
+	if err := os.WriteFile(mkvPath, real, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Real.strm"), []byte("http://x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := minimalCfg()
+	cfg.Output.Path = dir
+	h := makeHandler(cfg, "")
+	body, _ := json.Marshal(map[string]interface{}{
+		"eventType": "Download",
+		"movieFile": map[string]string{"path": mkvPath},
+	})
+	h.handleWebhook(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/webhook", bytes.NewReader(body)))
+
+	if _, err := os.Stat(mkvPath); err != nil {
+		t.Error("real video was deleted")
+	}
+}
+
+func TestWebhookPlacesStrmFromSource(t *testing.T) {
+	// arr imported the stub into the library without the .strm (strm is not
+	// an extra file). VODarr copies the .strm from beside the source stub,
+	// then removes the library stub.
+	output := t.TempDir()
+	srcMkv := filepath.Join(output, "tv", "Scrubs", "Season 01", "Scrubs.S01E01.WEB-DL.mkv")
+	if err := os.MkdirAll(filepath.Dir(srcMkv), 0755); err != nil {
+		t.Fatal(err)
+	}
+	const url = "http://provider.example.com/series/u/p/1.mkv\n"
+	if err := os.WriteFile(strings.TrimSuffix(srcMkv, ".mkv")+".strm", []byte(url), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	library := t.TempDir()
+	libMkv := filepath.Join(library, "Scrubs - S01E01 - My First Day WEBDL-1080p.mkv")
+	if err := os.WriteFile(libMkv, strm.BuildMKVHeader(nil), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := minimalCfg()
+	cfg.Output.Path = output
+	h := makeHandler(cfg, "")
+	body, _ := json.Marshal(map[string]interface{}{
+		"eventType":   "Download",
+		"episodeFile": map[string]string{"path": libMkv, "sourcePath": srcMkv},
+	})
+	h.handleWebhook(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/webhook", bytes.NewReader(body)))
+
+	got, err := os.ReadFile(strings.TrimSuffix(libMkv, ".mkv") + ".strm")
+	if err != nil {
+		t.Fatalf("library .strm not written: %v", err)
+	}
+	if string(got) != url {
+		t.Errorf("library .strm = %q, want %q", got, url)
+	}
+	if _, err := os.Stat(libMkv); !os.IsNotExist(err) {
+		t.Error("expected library stub to be deleted")
+	}
+}
+
+func TestWebhookKeepsStubWithoutAnyStrm(t *testing.T) {
+	// No .strm anywhere: deleting the stub would leave nothing playable.
+	library := t.TempDir()
+	libMkv := filepath.Join(library, "Show - S01E01.mkv")
+	if err := os.WriteFile(libMkv, strm.BuildMKVHeader(nil), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := minimalCfg()
+	cfg.Output.Path = t.TempDir()
+	h := makeHandler(cfg, "")
+	body, _ := json.Marshal(map[string]interface{}{
+		"eventType":   "Download",
+		"episodeFile": map[string]string{"path": libMkv, "sourcePath": filepath.Join(cfg.Output.Path, "gone.mkv")},
+	})
+	h.handleWebhook(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/webhook", bytes.NewReader(body)))
+
+	if _, err := os.Stat(libMkv); err != nil {
+		t.Error("stub was deleted although no .strm exists")
+	}
+}
+
+func TestWebhookIgnoresSourceOutsideOutputPath(t *testing.T) {
+	// sourcePath comes from an unauthenticated request: a .strm outside
+	// output.path must never be copied into the library.
+	elsewhere := t.TempDir()
+	srcMkv := filepath.Join(elsewhere, "x.mkv")
+	if err := os.WriteFile(filepath.Join(elsewhere, "x.strm"), []byte("http://evil"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	library := t.TempDir()
+	libMkv := filepath.Join(library, "Show - S01E01.mkv")
+	if err := os.WriteFile(libMkv, strm.BuildMKVHeader(nil), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := minimalCfg()
+	cfg.Output.Path = t.TempDir()
+	h := makeHandler(cfg, "")
+	body, _ := json.Marshal(map[string]interface{}{
+		"eventType":   "Download",
+		"episodeFile": map[string]string{"path": libMkv, "sourcePath": srcMkv},
+	})
+	h.handleWebhook(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/webhook", bytes.NewReader(body)))
+
+	if _, err := os.Stat(strings.TrimSuffix(libMkv, ".mkv") + ".strm"); !os.IsNotExist(err) {
+		t.Error(".strm from outside output.path was copied into the library")
+	}
+}
+
+func TestExtensionListHelpers(t *testing.T) {
+	if !hasExtension("srt, .STRM,nfo", "strm") {
+		t.Error("hasExtension missed .STRM")
+	}
+	if hasExtension("srt,nfo,strmx", "strm") {
+		t.Error("hasExtension matched strmx")
+	}
+	if got := removeExtension("srt, .strm,nfo,strm", "strm"); got != "srt,nfo" {
+		t.Errorf("removeExtension = %q, want srt,nfo", got)
 	}
 }

@@ -31,6 +31,7 @@ type Client struct {
 type SeriesResult struct {
 	TVDBID int    // numeric TVDB ID
 	Name   string // series name as returned by TVDB
+	Year   string // first-aired year, "" when TVDB has none
 }
 
 func NewClient(apiKey string) *Client {
@@ -45,6 +46,16 @@ func NewClient(apiKey string) *Client {
 // or nil if nothing was found.  Authentication is performed lazily on the first
 // call.
 func (c *Client) SearchSeries(ctx context.Context, title string) (*SeriesResult, error) {
+	results, err := c.SearchSeriesAll(ctx, title)
+	if err != nil || len(results) == 0 {
+		return nil, err
+	}
+	return &results[0], nil
+}
+
+// SearchSeriesAll searches TVDB for a series by title and returns every
+// result with a valid ID, in TVDB's relevance order.
+func (c *Client) SearchSeriesAll(ctx context.Context, title string) ([]SeriesResult, error) {
 	token, err := c.EnsureToken(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("tvdb auth: %w", err)
@@ -73,21 +84,22 @@ func (c *Client) SearchSeries(ctx context.Context, title string) (*SeriesResult,
 		Data []struct {
 			TVDBIDStr string `json:"tvdb_id"`
 			Name      string `json:"name"`
+			Year      string `json:"year"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return nil, fmt.Errorf("tvdb search decode: %w", err)
 	}
-	if len(payload.Data) == 0 {
-		return nil, nil
-	}
 
-	first := payload.Data[0]
-	id, err := strconv.Atoi(first.TVDBIDStr)
-	if err != nil || id <= 0 {
-		return nil, nil
+	var out []SeriesResult
+	for _, d := range payload.Data {
+		id, err := strconv.Atoi(d.TVDBIDStr)
+		if err != nil || id <= 0 {
+			continue
+		}
+		out = append(out, SeriesResult{TVDBID: id, Name: d.Name, Year: d.Year})
 	}
-	return &SeriesResult{TVDBID: id, Name: first.Name}, nil
+	return out, nil
 }
 
 // jwtExpiry decodes the exp claim from a JWT token's payload without validating the signature.

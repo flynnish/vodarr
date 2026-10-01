@@ -18,11 +18,14 @@ output:
 
 sync:
   interval: "6h"           # How often to refresh Xtream catalog
-  on_startup: true         # Sync immediately on start
+  on_startup: true         # Sync on start, unless the cached index is younger than one interval
   parallelism: 10          # Concurrent workers for series fetch and TMDB enrichment (1-20)
   # title_cleanup_patterns:  # Regex patterns removed from stream names before TMDB search
   #   - '\s*\(DUBBED\)'
   #   - '\s*\[EXTENDED\]'
+  # excluded_categories:     # Provider groups to leave out; easiest to set in Settings → Provider Groups
+  #   - "vod:12"             # "vod:<category_id>" for movie groups
+  #   - "series:34"          # "series:<category_id>" for series groups
 
 server:
   newznab_port: 9091       # Newznab indexer API port
@@ -33,6 +36,7 @@ logging:
   level: "info"
 
 # arr:
+#   auto_search: true         # after each sync, ask arr to search for its wanted items VODarr has (default true)
 #   instances:
 #     - name: "Sonarr"
 #       type: sonarr          # "sonarr" or "radarr"
