@@ -196,10 +196,16 @@ func (h *Handler) handleMatchSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 type matchRequest struct {
-	Type     string `json:"type"` // "movie" or "series"
+	Type     string `json:"type"` // provider type, "movie" or "series": identifies the item
 	XtreamID int    `json:"xtream_id"`
 	TMDBId   string `json:"tmdb_id"`
 	TVDBId   string `json:"tvdb_id"`
+
+	// Optional type change, see vodarrsync.MatchOverride.
+	AsType    string `json:"as_type"`
+	Season    int    `json:"season"`
+	Episode   int    `json:"episode"`
+	EpisodeID int    `json:"episode_id"`
 }
 
 // handlePutMatch sets a manual match and returns the updated item.
@@ -221,7 +227,10 @@ func (h *Handler) handlePutMatch(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	item, err := h.scheduler.SetMatch(ctx, mt, req.XtreamID, vodarrsync.MatchOverride{TMDBId: req.TMDBId, TVDBId: req.TVDBId})
+	item, err := h.scheduler.SetMatch(ctx, mt, req.XtreamID, vodarrsync.MatchOverride{
+		TMDBId: req.TMDBId, TVDBId: req.TVDBId,
+		AsType: req.AsType, Season: req.Season, Episode: req.Episode, EpisodeID: req.EpisodeID,
+	})
 	h.writeMatchResult(w, item, err)
 }
 

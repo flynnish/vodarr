@@ -13,13 +13,20 @@ function useContent(type) {
       .catch(() => setLoading(false))
   }, [type])
 
-  // Swap one item in place after a manual match, without refetching.
+  // Swap or drop one item after a manual match, without refetching. Items
+  // are identified by provider type + ID, which a type change keeps.
+  const sameItem = (a, b) => a.XtreamID === b.XtreamID && (a.source_type || a.Type) === (b.source_type || b.Type)
   const updateItem = updated => setData(d => d && {
     ...d,
-    items: d.items.map(i => (i.XtreamID === updated.XtreamID && i.Type === updated.Type ? updated : i)),
+    items: d.items.map(i => (sameItem(i, updated) ? updated : i)),
+  })
+  const removeItem = gone => setData(d => d && {
+    ...d,
+    items: d.items.filter(i => !sameItem(i, gone)),
+    total: d.total - 1,
   })
 
-  return { items: data?.items ?? [], total: data?.total ?? 0, loading, updateItem }
+  return { items: data?.items ?? [], total: data?.total ?? 0, loading, updateItem, removeItem }
 }
 
 function useStatus() {
@@ -116,7 +123,7 @@ export default function Content({ initialFilter = 'all', onFilterChange }) {
   const syncGen = status?.sync_gen ?? 0
   const graceCycles = status?.grace_cycles ?? 0
 
-  const { items, total, loading, updateItem } = useContent(tab)
+  const { items, total, loading, updateItem, removeItem } = useContent(tab)
   const [fixing, setFixing] = useState(null) // item whose match is being fixed
 
   // Sync external filter changes (e.g. navigation from Dashboard).
@@ -289,6 +296,11 @@ export default function Content({ initialFilter = 'all', onFilterChange }) {
                       {item.category}
                     </p>
                   )}
+                  {item.source_type && (
+                    <p className="font-mono text-[10px] text-amber-400/70 truncate mt-0.5">
+                      Provider lists this as a {item.source_type}
+                    </p>
+                  )}
                   <FailReason item={item} />
                 </div>
                 <p className="font-mono text-[11px] text-steel-500 w-10 text-right">
@@ -321,9 +333,13 @@ export default function Content({ initialFilter = 'all', onFilterChange }) {
       {fixing && (
         <MatchDialog
           item={fixing}
-          type={tab === 'movies' ? 'movie' : 'series'}
           onClose={() => setFixing(null)}
-          onUpdated={updated => { updateItem(updated); setFixing(null) }}
+          onUpdated={updated => {
+            // A type change moves the item to the other tab.
+            const tabType = tab === 'movies' ? 'movie' : 'series'
+            updated.Type === tabType ? updateItem(updated) : removeItem(updated)
+            setFixing(null)
+          }}
         />
       )}
 
@@ -366,8 +382,14 @@ function stripGroupPrefix(name) {
 }
 
 // MatchDialog lets the user pick the right TMDB entry for an item (or, for a
-// series, type a TVDB ID), or reset a manual match to automatic matching.
-function MatchDialog({ item, type, onClose, onUpdated }) {
+// series, type a TVDB ID), change what it is offered as when the provider
+// filed it under the wrong type, or reset a manual match to automatic.
+function MatchDialog({ item, onClose, onUpdated }) {
+  const providerType = item.source_type || item.Type
+  const providerEpisodes = providerType === 'series' ? (item.Episodes || []) : []
+  const firstEp = item.source_type === 'movie' ? item.Episodes?.[0] : null
+
+  const [target, setTarget] = useState(item.Type)
   const [q, setQ] = useState(stripGroupPrefix(item.Name).replace(/\s*[([]\d{4}[)\]]\s*$/, ''))
   const [year, setYear] = useState('')
   const [results, setResults] = useState(null)
@@ -376,6 +398,13 @@ function MatchDialog({ item, type, onClose, onUpdated }) {
   const [error, setError] = useState(null)
   const [tmdbId, setTmdbId] = useState('')
   const [tvdbId, setTvdbId] = useState('')
+  const [season, setSeason] = useState(firstEp ? String(firstEp.Season) : '')
+  const [episode, setEpisode] = useState(firstEp ? String(firstEp.EpisodeNum) : '')
+  const [filmEpisode, setFilmEpisode] = useState(String(item.stream_episode_id || providerEpisodes[0]?.EpisodeID || ''))
+
+  const toEpisode = providerType === 'movie' && target === 'series'
+  const toFilm = providerType === 'series' && target === 'movie'
+  const missingDetails = (toEpisode && (season === '' || !episode)) || (toFilm && !filmEpisode)
 
   const search = async e => {
     e?.preventDefault()
@@ -383,7 +412,7 @@ function MatchDialog({ item, type, onClose, onUpdated }) {
     setSearching(true)
     setError(null)
     try {
-      const params = new URLSearchParams({ type, q: q.trim() })
+      const params = new URLSearchParams({ type: target, q: q.trim() })
       if (year.trim()) params.set('year', year.trim())
       const res = await fetch(`/api/match/search?${params}`)
       const data = await res.json()
@@ -396,8 +425,9 @@ function MatchDialog({ item, type, onClose, onUpdated }) {
     }
   }
 
-  // Search straight away with the prefilled title.
-  useEffect(() => { search() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  // Search straight away with the prefilled title, and again on a type switch
+  // (movies and TV are separate TMDB searches).
+  useEffect(() => { search() }, [target]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const send = async (url, options) => {
     setBusy(true)
@@ -413,15 +443,22 @@ function MatchDialog({ item, type, onClose, onUpdated }) {
     }
   }
 
+  const typeChange = () => {
+    if (target === providerType) return {}
+    if (toEpisode) return { as_type: target, season: Number(season), episode: Number(episode) }
+    return { as_type: target, episode_id: Number(filmEpisode) }
+  }
+
   const apply = body => send('/api/match', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type, xtream_id: item.XtreamID, ...body }),
+    body: JSON.stringify({ type: providerType, xtream_id: item.XtreamID, ...body, ...typeChange() }),
   })
 
-  const reset = () => send(`/api/match?type=${type}&xtream_id=${item.XtreamID}`, { method: 'DELETE' })
+  const reset = () => send(`/api/match?type=${providerType}&xtream_id=${item.XtreamID}`, { method: 'DELETE' })
 
   const input = 'px-3 py-1.5 bg-void-900/40 border border-void-600 rounded font-mono text-[12px] text-steel-300 placeholder-steel-500'
+  const typeLabel = t => (t === 'movie' ? 'Movie (Radarr)' : providerType === 'movie' ? 'TV episode (Sonarr)' : 'Series (Sonarr)')
 
   return (
     <div
@@ -436,15 +473,75 @@ function MatchDialog({ item, type, onClose, onUpdated }) {
               {item.Name}{item.Year ? ` · ${item.Year}` : ''}{item.category ? ` · ${item.category}` : ''}
             </p>
             <p className="font-mono text-[10px] text-steel-500 mt-0.5">
-              Now: {item.CanonicalName || 'unmatched'}
+              Now: {item.Type === 'movie' ? 'movie' : 'series'} · {item.CanonicalName || 'unmatched'}
               {item.TMDBId ? ` · tmdb ${item.TMDBId}` : ''}{item.TVDBId ? ` · tvdb ${item.TVDBId}` : ''}{item.IMDBId ? ` · ${item.IMDBId}` : ''}
             </p>
           </div>
           <button type="button" onClick={onClose} disabled={busy} aria-label="Close" className="font-mono text-[12px] text-steel-500 hover:text-steel-300">✕</button>
         </div>
 
+        <div className="px-5 py-3 border-b border-void-600 space-y-2">
+          <div className="flex flex-wrap items-center gap-2 font-mono text-[11px]">
+            <span className="text-steel-500">Offer as</span>
+            {['movie', 'series'].map(t => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setTarget(t)}
+                className={[
+                  'px-3 py-1 rounded border transition-all',
+                  target === t ? 'bg-lime-400/10 text-lime-400 border-lime-400/20' : 'text-steel-400 border-void-600 hover:text-steel-300',
+                ].join(' ')}
+              >
+                {typeLabel(t)}
+              </button>
+            ))}
+            {target !== providerType && (
+              <span className="text-amber-400/80">the provider lists it as a {providerType}</span>
+            )}
+          </div>
+          {toEpisode && (
+            <div className="space-y-1.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  value={season}
+                  onChange={e => setSeason(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                  placeholder="Season"
+                  className={`w-24 ${input}`}
+                />
+                <input
+                  value={episode}
+                  onChange={e => setEpisode(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                  placeholder="Episode"
+                  className={`w-24 ${input}`}
+                />
+              </div>
+              <p className="font-mono text-[10px] text-steel-500">
+                Pick the series below (e.g. Storyville) and enter the season and episode as Sonarr shows them for it
+                (TheTVDB numbering). Season 0 is specials.
+              </p>
+            </div>
+          )}
+          {toFilm && providerEpisodes.length > 1 && (
+            <label className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-steel-500">
+              Which episode is the film
+              <select
+                value={filmEpisode}
+                onChange={e => setFilmEpisode(e.target.value)}
+                className="px-2 py-1 bg-void-900/40 border border-void-600 rounded font-mono text-[12px] text-steel-300"
+              >
+                {providerEpisodes.map(ep => (
+                  <option key={ep.EpisodeID} value={ep.EpisodeID}>
+                    S{String(ep.Season).padStart(2, '0')}E{String(ep.EpisodeNum).padStart(2, '0')}{ep.Title ? ` · ${ep.Title}` : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+
         <form onSubmit={search} className="px-5 py-3 flex gap-2 border-b border-void-600">
-          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Title" className={`flex-1 min-w-0 ${input}`} />
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder={target === 'movie' ? 'Film title' : 'Series title'} className={`flex-1 min-w-0 ${input}`} />
           <input
             value={year}
             onChange={e => setYear(e.target.value.replace(/\D/g, '').slice(0, 4))}
@@ -452,7 +549,7 @@ function MatchDialog({ item, type, onClose, onUpdated }) {
             className={`w-20 ${input}`}
           />
           <button type="submit" disabled={searching} className="px-3 py-1.5 bg-void-600 border border-void-500 rounded font-mono text-[12px] text-steel-300 hover:bg-void-500 disabled:opacity-40">
-            {searching ? 'Searching…' : 'Search TMDB'}
+            {searching ? 'Searching…' : target === 'movie' ? 'Search TMDB films' : 'Search TMDB TV'}
           </button>
         </form>
 
@@ -462,7 +559,7 @@ function MatchDialog({ item, type, onClose, onUpdated }) {
           ) : results.length === 0 ? (
             <p className="px-5 py-6 font-mono text-[11px] text-steel-500">No TMDB results. Try another title, or enter an ID below.</p>
           ) : results.map(r => {
-            const current = String(r.id) === item.TMDBId
+            const current = String(r.id) === item.TMDBId && target === item.Type
             return (
               <div key={r.id} className="flex gap-3 px-5 py-2.5 items-start">
                 {r.poster
@@ -480,7 +577,8 @@ function MatchDialog({ item, type, onClose, onUpdated }) {
                 </div>
                 <button
                   type="button"
-                  disabled={busy || current}
+                  disabled={busy || current || missingDetails}
+                  title={missingDetails ? (toEpisode ? 'Enter the season and episode first' : 'Choose the film episode first') : ''}
                   onClick={() => apply({ tmdb_id: String(r.id) })}
                   className="flex-none px-3 py-1 bg-lime-400/10 border border-lime-400/30 text-lime-400 rounded font-mono text-[11px] hover:bg-lime-400/20 disabled:opacity-40"
                 >
@@ -496,10 +594,10 @@ function MatchDialog({ item, type, onClose, onUpdated }) {
             <input
               value={tmdbId}
               onChange={e => setTmdbId(e.target.value.replace(/\D/g, ''))}
-              placeholder="TMDB ID"
-              className={`w-28 ${input}`}
+              placeholder={target === 'movie' ? 'TMDB film ID' : 'TMDB TV ID'}
+              className={`w-32 ${input}`}
             />
-            {type === 'series' && (
+            {target === 'series' && (
               <input
                 value={tvdbId}
                 onChange={e => setTvdbId(e.target.value.replace(/\D/g, ''))}
@@ -510,11 +608,11 @@ function MatchDialog({ item, type, onClose, onUpdated }) {
             )}
             <button
               type="button"
-              disabled={busy || (!tmdbId && !tvdbId)}
-              onClick={() => apply({ tmdb_id: tmdbId, tvdb_id: tvdbId })}
+              disabled={busy || (!tmdbId && !tvdbId) || missingDetails}
+              onClick={() => apply({ tmdb_id: tmdbId, tvdb_id: target === 'series' ? tvdbId : '' })}
               className="px-3 py-1 bg-void-600 border border-void-500 rounded font-mono text-[11px] text-steel-300 hover:bg-void-500 disabled:opacity-40"
             >
-              Use ID{type === 'series' ? 's' : ''}
+              Use ID{target === 'series' ? 's' : ''}
             </button>
             {item.manual_match && (
               <button

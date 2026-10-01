@@ -293,6 +293,12 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) {
 
 	// Build JSON descriptor with a clean name (IPTV prefix and embedded year stripped).
 	cleanName := sanitizeNameForTitle(found.Name)
+	if found.SourceType != "" && found.CanonicalName != "" {
+		// Type was changed by hand, so the provider's name describes the wrong
+		// thing (e.g. a documentary's title rather than its series): name the
+		// files after the matched title instead.
+		cleanName = sanitizeNameForTitle(found.CanonicalName)
+	}
 	desc := map[string]interface{}{
 		"xtream_id":     found.XtreamID,
 		"type":          string(found.Type),
@@ -303,6 +309,12 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) {
 		"tmdb_id":       found.TMDBId,
 		"container_ext": found.ContainerExt,
 		"episodes":      episodes,
+	}
+	// After a type change the stream is still the provider's: tell the
+	// download side which kind of stream URL to build.
+	if found.SourceType != "" {
+		desc["source_type"] = string(found.SourceType)
+		desc["stream_episode_id"] = found.StreamEpisodeID
 	}
 
 	descJSON, err := json.Marshal(desc)
@@ -453,6 +465,9 @@ func (h *Handler) probeItemSizes(ctx context.Context, items []*index.Item, seaso
 	for _, item := range items {
 		if item.Type != index.TypeMovie {
 			continue // series sizes set at sync time from NUMBER_OF_BYTES tag
+		}
+		if item.SourceType != "" {
+			continue // a provider episode offered as a film: XtreamID is not a VOD stream ID
 		}
 		key := fmt.Sprintf("m:%d", item.XtreamID)
 		if v, ok := h.sizeCache.Load(key); ok {

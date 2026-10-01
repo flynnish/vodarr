@@ -164,6 +164,13 @@ If a title is matched to the wrong show or movie (or not matched at all), open *
 
 A manual match applies immediately and is kept across every sync and restart. It is stored in `matches.json` next to `config.yml`. **Reset to automatic** removes it and re-runs normal matching.
 
+**Changing the type.** Providers sometimes file things under the wrong type: a documentary that is really one episode of a series (e.g. a *Storyville* film listed under movies), or a special that TMDB lists as a film but the provider lists as a series. In **Fix match**, use **Offer as**:
+
+- **Movie → TV episode:** pick the series (e.g. Storyville) and enter the season and episode as Sonarr numbers them (TheTVDB numbering; season 0 is specials). Sonarr is then offered that stream as that episode.
+- **Series → Movie:** pick the TMDB film and, if the provider's series has several episodes, which one is the film. Radarr is then offered it as that movie.
+
+The item moves to the other tab, keeps streaming from the provider's original entry, and the change survives every sync.
+
 ## Grace period for provider outages
 
 When a title disappears from the provider catalog (e.g. during a temporary outage), VODarr retains it in the index for a configurable number of syncs before removing its `.strm` files. This prevents Sonarr/Radarr from losing track of content during short-lived outages.

@@ -363,7 +363,7 @@ func (s *Scheduler) Sync(ctx context.Context) error {
 		allCachedItems = cached.Items
 		cachedByKey = make(map[string]*index.Item, len(cached.Items))
 		for _, ci := range cached.Items {
-			cachedByKey[fmt.Sprintf("%s:%d", ci.Type, ci.XtreamID)] = ci
+			cachedByKey[ci.Key()] = ci
 		}
 	}
 
@@ -401,14 +401,14 @@ func (s *Scheduler) Sync(ctx context.Context) error {
 		// Build a key set of items present in this sync.
 		freshKeys := make(map[string]struct{}, len(enriched))
 		for _, item := range enriched {
-			freshKeys[fmt.Sprintf("%s:%d", item.Type, item.XtreamID)] = struct{}{}
+			freshKeys[item.Key()] = struct{}{}
 		}
 
 		var retained []*index.Item
 		var expired []*index.Item
 
 		for _, ci := range allCachedItems {
-			key := fmt.Sprintf("%s:%d", ci.Type, ci.XtreamID)
+			key := ci.Key()
 			if _, ok := freshKeys[key]; ok {
 				// Item is present in this sync — already in enriched list.
 				continue
@@ -894,7 +894,7 @@ func (s *Scheduler) enrich(ctx context.Context, items []*index.Item, cachedByKey
 				}
 
 				// A manual match always wins over automatic matching.
-				if ov, ok := s.override(itemKey(item.Type, item.XtreamID)); ok {
+				if ov, ok := s.override(item.Key()); ok {
 					if err := s.applyOverride(ctx, item, ov); err != nil {
 						errMu.Lock()
 						lastErr = err
@@ -910,7 +910,7 @@ func (s *Scheduler) enrich(ctx context.Context, items []*index.Item, cachedByKey
 				// search later fails. Skip enrichment only when CanonicalName is
 				// also set — items cached before that feature get re-enriched once.
 				if cachedByKey != nil {
-					key := fmt.Sprintf("%s:%d", item.Type, item.XtreamID)
+					key := item.Key()
 					// Items matched by title under an older algorithm are
 					// re-enriched from scratch so a wrong cached ID can be
 					// corrected. Items the provider tags with a TMDB ID never

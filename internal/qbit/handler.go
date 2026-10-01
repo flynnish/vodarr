@@ -43,7 +43,11 @@ type itemDescriptor struct {
 	TVDBId       string `json:"tvdb_id"`
 	TMDBId       string `json:"tmdb_id"`
 	ContainerExt string `json:"container_ext"`
-	Episodes     []struct {
+	// SourceType is set when a manual match changed the type: the stream is
+	// still the provider's original kind (see movieStreamURL/episodeStreamURL).
+	SourceType      string `json:"source_type,omitempty"`
+	StreamEpisodeID int    `json:"stream_episode_id,omitempty"`
+	Episodes        []struct {
 		EpisodeID  int    `json:"EpisodeID"`
 		Season     int    `json:"Season"`
 		EpisodeNum int    `json:"EpisodeNum"`
@@ -439,6 +443,24 @@ func (h *Handler) processDescriptor(desc itemDescriptor, hash string, savePath, 
 	return nil
 }
 
+// movieStreamURL is the stream for a movie descriptor. A provider series
+// offered as a film streams the chosen provider episode.
+func (h *Handler) movieStreamURL(desc itemDescriptor, ext string) string {
+	if desc.SourceType == "series" {
+		return h.xtream.SeriesStreamURL(desc.StreamEpisodeID, ext)
+	}
+	return h.xtream.StreamURL(desc.XtreamID, ext)
+}
+
+// episodeStreamURL is the stream for one episode of a series descriptor. A
+// VOD stream offered as an episode carries its VOD stream ID as episode ID.
+func (h *Handler) episodeStreamURL(desc itemDescriptor, episodeID int, ext string) string {
+	if desc.SourceType == "movie" {
+		return h.xtream.StreamURL(episodeID, ext)
+	}
+	return h.xtream.SeriesStreamURL(episodeID, ext)
+}
+
 // processStrm writes .strm pointer files and .mkv stubs (original behavior).
 func (h *Handler) processStrm(desc itemDescriptor, hash string) {
 	if h.xtream == nil || h.writer == nil {
@@ -459,7 +481,7 @@ func (h *Handler) processStrm(desc itemDescriptor, hash string) {
 
 	switch desc.Type {
 	case "movie":
-		streamURL := h.xtream.StreamURL(desc.XtreamID, ext)
+		streamURL := h.movieStreamURL(desc, ext)
 		var info *probe.MediaInfo
 		if h.prober != nil {
 			var probeErr error
@@ -483,7 +505,7 @@ func (h *Handler) processStrm(desc itemDescriptor, hash string) {
 			if epExt == "" {
 				epExt = "mkv"
 			}
-			streamURL := h.xtream.SeriesStreamURL(ep.EpisodeID, epExt)
+			streamURL := h.episodeStreamURL(desc, ep.EpisodeID, epExt)
 			if i == 0 && h.prober != nil {
 				var probeErr error
 				seriesInfo, probeErr = h.prober.Probe(ctx, streamURL)
@@ -537,7 +559,7 @@ func (h *Handler) processDownload(desc itemDescriptor, hash string) {
 
 	switch desc.Type {
 	case "movie":
-		streamURL := h.xtream.StreamURL(desc.XtreamID, ext)
+		streamURL := h.movieStreamURL(desc, ext)
 		destPath := h.writer.MovieFilePath(desc.Name, desc.Year, ext)
 
 		slog.Info("download starting", "name", desc.Name, "type", "movie", "dest", destPath)
@@ -554,7 +576,7 @@ func (h *Handler) processDownload(desc itemDescriptor, hash string) {
 			if epExt == "" {
 				epExt = "mkv"
 			}
-			streamURL := h.xtream.SeriesStreamURL(ep.EpisodeID, epExt)
+			streamURL := h.episodeStreamURL(desc, ep.EpisodeID, epExt)
 			destPath := h.writer.EpisodeFilePath(desc.Name, ep.Season, ep.EpisodeNum, ep.Title, epExt)
 
 			slog.Info("download starting", "name", desc.Name, "episode", fmt.Sprintf("S%02dE%02d", ep.Season, ep.EpisodeNum), "dest", destPath)

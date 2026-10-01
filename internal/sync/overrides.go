@@ -17,9 +17,25 @@ import (
 // MatchOverride is a user's manual match for one catalog item. At least one
 // ID is set. TVDBId lets a series be matched when TMDB lacks a TVDB link (or
 // the show is not on TMDB at all), since Sonarr searches by TVDB ID.
+//
+// AsType changes what the item is offered as, when the provider filed it
+// under the wrong type:
+//   - a VOD "movie" that is a TV episode (e.g. one documentary of a series
+//     such as Storyville) becomes episode Season x Episode of the TMDB/TVDB
+//     series, for Sonarr;
+//   - a provider "series" that is a film (e.g. a special) becomes that TMDB
+//     movie for Radarr, streaming provider episode EpisodeID.
+//
+// The IDs then refer to the new type: a TMDB TV ID for an episode, a TMDB
+// movie ID for a film.
 type MatchOverride struct {
 	TMDBId string `json:"tmdb_id,omitempty"`
 	TVDBId string `json:"tvdb_id,omitempty"`
+
+	AsType    string `json:"as_type,omitempty"`    // "movie" or "series"; "" = provider type
+	Season    int    `json:"season,omitempty"`     // movie -> episode
+	Episode   int    `json:"episode,omitempty"`    // movie -> episode
+	EpisodeID int    `json:"episode_id,omitempty"` // series -> movie
 }
 
 // ErrItemNotFound is returned when a manual match names an unknown item.
@@ -84,9 +100,70 @@ func (s *Scheduler) override(key string) (MatchOverride, bool) {
 	return ov, ok
 }
 
-// applyOverride sets item's external IDs from a manual match, fetching the
-// IMDB/TVDB cross-references and canonical title from TMDB.
+// revertType restores an item's provider type after a type change.
+func revertType(item *index.Item) {
+	switch item.SourceType {
+	case index.TypeMovie:
+		item.Type = index.TypeMovie
+		item.Episodes = nil
+	case index.TypeSeries:
+		item.Type = index.TypeSeries
+		item.StreamEpisodeID = 0
+	}
+	item.SourceType = ""
+}
+
+// convertType changes item to the override's type, starting from the
+// provider's shape. The stream stays the provider's (see Item.SourceType).
+func convertType(item *index.Item, ov MatchOverride) {
+	revertType(item)
+	target := index.MediaType(ov.AsType)
+	if target == "" || target == item.Type {
+		return
+	}
+	switch target {
+	case index.TypeSeries: // VOD stream offered as one episode
+		item.Episodes = []index.EpisodeItem{{
+			EpisodeID:  item.XtreamID,
+			Season:     ov.Season,
+			EpisodeNum: ov.Episode,
+			Ext:        item.ContainerExt,
+			Duration:   item.Duration,
+			FileSize:   item.FileSize,
+		}}
+	case index.TypeMovie: // one provider episode offered as a film
+		ep, ok := findEpisode(item.Episodes, ov.EpisodeID)
+		if !ok {
+			if len(item.Episodes) == 0 {
+				slog.Warn("type change to movie skipped: series has no episodes", "name", item.Name)
+				return
+			}
+			// The chosen episode vanished from the provider; use the first.
+			slog.Warn("chosen episode missing, using the first", "name", item.Name, "episode_id", ov.EpisodeID)
+			ep = item.Episodes[0]
+		}
+		item.StreamEpisodeID = ep.EpisodeID
+		item.ContainerExt = ep.Ext
+		item.Duration = ep.Duration
+		item.FileSize = ep.FileSize
+	}
+	item.SourceType = item.Type
+	item.Type = target
+}
+
+func findEpisode(eps []index.EpisodeItem, id int) (index.EpisodeItem, bool) {
+	for _, ep := range eps {
+		if ep.EpisodeID == id {
+			return ep, true
+		}
+	}
+	return index.EpisodeItem{}, false
+}
+
+// applyOverride sets item's type and external IDs from a manual match,
+// fetching the IMDB/TVDB cross-references and canonical title from TMDB.
 func (s *Scheduler) applyOverride(ctx context.Context, item *index.Item, ov MatchOverride) error {
+	convertType(item, ov)
 	item.TMDBId = ov.TMDBId
 	item.IMDBId = ""
 	item.TVDBId = ""
@@ -148,11 +225,12 @@ func (s *Scheduler) applyOverride(ctx context.Context, item *index.Item, ov Matc
 // reapplyOverrides makes sure every item with a manual match carries it.
 func (s *Scheduler) reapplyOverrides(ctx context.Context, items []*index.Item) {
 	for _, item := range items {
-		ov, ok := s.override(itemKey(item.Type, item.XtreamID))
+		ov, ok := s.override(item.Key())
 		if !ok {
 			continue
 		}
-		if item.ManualMatch && item.TMDBId == ov.TMDBId && (ov.TVDBId == "" || item.TVDBId == ov.TVDBId) {
+		sameType := ov.AsType == "" || item.Type == index.MediaType(ov.AsType)
+		if item.ManualMatch && sameType && item.TMDBId == ov.TMDBId && (ov.TVDBId == "" || item.TVDBId == ov.TVDBId) {
 			continue
 		}
 		if err := s.applyOverride(ctx, item, ov); err != nil {
@@ -162,7 +240,8 @@ func (s *Scheduler) reapplyOverrides(ctx context.Context, items []*index.Item) {
 }
 
 // SetMatch stores a manual match for an item and applies it to the live
-// index immediately. It is kept across syncs until ClearMatch.
+// index immediately. It is kept across syncs until ClearMatch. mediaType is
+// the provider type, which identifies the item.
 func (s *Scheduler) SetMatch(ctx context.Context, mediaType index.MediaType, xtreamID int, ov MatchOverride) (*index.Item, error) {
 	ov.TMDBId = strings.TrimSpace(ov.TMDBId)
 	ov.TVDBId = strings.TrimSpace(ov.TVDBId)
@@ -174,13 +253,43 @@ func (s *Scheduler) SetMatch(ctx context.Context, mediaType index.MediaType, xtr
 	if ov.TMDBId == "" && ov.TVDBId == "" {
 		return nil, errors.New("a TMDB or TVDB ID is required")
 	}
-	if ov.TVDBId != "" && mediaType != index.TypeSeries {
-		return nil, errors.New("a TVDB ID only applies to series")
-	}
 
 	item := s.idx.SearchByXtreamID(xtreamID, string(mediaType))
 	if item == nil {
 		return nil, ErrItemNotFound
+	}
+
+	target := mediaType
+	switch ov.AsType {
+	case "", string(mediaType):
+		ov.AsType = ""
+	case string(index.TypeMovie), string(index.TypeSeries):
+		target = index.MediaType(ov.AsType)
+	default:
+		return nil, fmt.Errorf("invalid type %q", ov.AsType)
+	}
+	if ov.TVDBId != "" && target != index.TypeSeries {
+		return nil, errors.New("a TVDB ID only applies to series")
+	}
+	switch {
+	case mediaType == index.TypeMovie && target == index.TypeSeries:
+		if ov.Season < 0 || ov.Episode < 1 {
+			return nil, errors.New("a season (0 for specials) and episode number are required")
+		}
+		ov.EpisodeID = 0
+	case mediaType == index.TypeSeries && target == index.TypeMovie:
+		if ov.TMDBId == "" {
+			return nil, errors.New("a TMDB movie ID is required")
+		}
+		if ov.EpisodeID == 0 && len(item.Episodes) == 1 {
+			ov.EpisodeID = item.Episodes[0].EpisodeID
+		}
+		if _, ok := findEpisode(item.Episodes, ov.EpisodeID); !ok {
+			return nil, errors.New("choose which episode is the film")
+		}
+		ov.Season, ov.Episode = 0, 0
+	default:
+		ov.Season, ov.Episode, ov.EpisodeID = 0, 0, 0
 	}
 
 	s.overridesMu.Lock()
@@ -199,7 +308,7 @@ func (s *Scheduler) SetMatch(ctx context.Context, mediaType index.MediaType, xtr
 		slog.Warn("manual match lookup incomplete", "name", item.Name, "error", err)
 	}
 	s.replaceIndexItem(&updated)
-	slog.Info("manual match set", "name", item.Name, "tmdb_id", ov.TMDBId, "tvdb_id", ov.TVDBId,
+	slog.Info("manual match set", "name", item.Name, "type", updated.Type, "tmdb_id", ov.TMDBId, "tvdb_id", ov.TVDBId,
 		"imdb_id", updated.IMDBId, "resolved_tvdb_id", updated.TVDBId)
 	return &updated, nil
 }
@@ -221,6 +330,7 @@ func (s *Scheduler) ClearMatch(ctx context.Context, mediaType index.MediaType, x
 	}
 
 	updated := *item
+	revertType(&updated)
 	updated.ManualMatch = false
 	updated.TMDBId = updated.ProviderTMDBId
 	updated.IMDBId = ""
@@ -239,7 +349,7 @@ func (s *Scheduler) replaceIndexItem(updated *index.Item) {
 	s.indexEditMu.Lock()
 	all := s.idx.All()
 	for i, it := range all {
-		if it.Type == updated.Type && it.XtreamID == updated.XtreamID {
+		if it.Key() == updated.Key() {
 			all[i] = updated
 		}
 	}

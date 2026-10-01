@@ -72,6 +72,16 @@ type Item struct {
 	// match rather than automatic title matching.
 	ManualMatch bool `json:"manual_match,omitempty"`
 
+	// SourceType is the provider's type when a manual match changed Type,
+	// e.g. a VOD "movie" that is really a TV episode, or a provider "series"
+	// that is really a film. Empty when unchanged. Streams always use the
+	// provider's type: XtreamID is a VOD stream ID or a series ID.
+	SourceType MediaType `json:"source_type,omitempty"`
+
+	// StreamEpisodeID is, for a provider series turned into a movie, the
+	// provider episode whose stream is the film.
+	StreamEpisodeID int `json:"stream_episode_id,omitempty"`
+
 	// MatchVersion records which version of the title matching logic
 	// produced the external IDs, so the sync can redo stale matches.
 	MatchVersion int `json:"match_version,omitempty"`
@@ -117,6 +127,21 @@ func xtreamKey(t MediaType, id int) string {
 	return fmt.Sprintf("%s:%d", t, id)
 }
 
+// ProviderType is the item's type on the provider side, which identifies it
+// (VOD and series IDs are separate ID spaces) and decides its stream URL,
+// even after a manual match changed Type.
+func (it *Item) ProviderType() MediaType {
+	if it.SourceType != "" {
+		return it.SourceType
+	}
+	return it.Type
+}
+
+// Key identifies an item as "<provider type>:<xtream id>".
+func (it *Item) Key() string {
+	return xtreamKey(it.ProviderType(), it.XtreamID)
+}
+
 // Replace atomically swaps the entire index content.
 func (idx *Index) Replace(items []*Item) {
 	byIMDB := make(map[string][]*Item)
@@ -137,7 +162,7 @@ func (idx *Index) Replace(items []*Item) {
 			byTMDB[item.TMDBId] = append(byTMDB[item.TMDBId], item)
 		}
 		if item.XtreamID > 0 {
-			byXtream[xtreamKey(item.Type, item.XtreamID)] = item
+			byXtream[item.Key()] = item
 		}
 	}
 
@@ -151,7 +176,9 @@ func (idx *Index) Replace(items []*Item) {
 }
 
 // SearchByXtreamID returns the item for the given Xtream stream/series ID.
-// mediaType should be "movie" or "series"; if empty, both types are tried.
+// mediaType is the provider type ("movie" for a VOD stream ID, "series" for
+// a series ID), which differs from Item.Type after a type change; if empty,
+// both are tried.
 func (idx *Index) SearchByXtreamID(id int, mediaType string) *Item {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
