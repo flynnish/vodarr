@@ -28,14 +28,41 @@ import (
 //
 // The IDs then refer to the new type: a TMDB TV ID for an episode, a TMDB
 // movie ID for a film.
+//
+// SeasonOffset renumbers a provider series' seasons to TheTVDB's, which
+// Sonarr searches by: a provider carrying only The Great British Bake Off's
+// Channel 4 years numbers them 1-9, TheTVDB continues from the BBC years, so
+// provider season 1 is season 8 and the offset is 7. Specials (season 0)
+// keep their number.
 type MatchOverride struct {
 	TMDBId string `json:"tmdb_id,omitempty"`
 	TVDBId string `json:"tvdb_id,omitempty"`
 
-	AsType    string `json:"as_type,omitempty"`    // "movie" or "series"; "" = provider type
-	Season    int    `json:"season,omitempty"`     // movie -> episode
-	Episode   int    `json:"episode,omitempty"`    // movie -> episode
-	EpisodeID int    `json:"episode_id,omitempty"` // series -> movie
+	AsType       string `json:"as_type,omitempty"`       // "movie" or "series"; "" = provider type
+	Season       int    `json:"season,omitempty"`        // movie -> episode
+	Episode      int    `json:"episode,omitempty"`       // movie -> episode
+	EpisodeID    int    `json:"episode_id,omitempty"`    // series -> movie
+	SeasonOffset int    `json:"season_offset,omitempty"` // provider series only
+}
+
+// maxSeasonOffset bounds SeasonOffset to a sane range.
+const maxSeasonOffset = 100
+
+// shiftSeasons returns a copy of eps with by added to every season but 0.
+// It never edits eps in place: the slice can be shared with the cache or
+// the live index.
+func shiftSeasons(eps []index.EpisodeItem, by int) []index.EpisodeItem {
+	if by == 0 || len(eps) == 0 {
+		return eps
+	}
+	out := make([]index.EpisodeItem, len(eps))
+	copy(out, eps)
+	for i := range out {
+		if out[i].Season > 0 {
+			out[i].Season += by
+		}
+	}
+	return out
 }
 
 // ErrItemNotFound is returned when a manual match names an unknown item.
@@ -100,8 +127,13 @@ func (s *Scheduler) override(key string) (MatchOverride, bool) {
 	return ov, ok
 }
 
-// revertType restores an item's provider type after a type change.
+// revertType restores an item's provider type and season numbering after a
+// manual match changed them.
 func revertType(item *index.Item) {
+	if item.SeasonOffset != 0 {
+		item.Episodes = shiftSeasons(item.Episodes, -item.SeasonOffset)
+		item.SeasonOffset = 0
+	}
 	switch item.SourceType {
 	case index.TypeMovie:
 		item.Type = index.TypeMovie
@@ -117,6 +149,10 @@ func revertType(item *index.Item) {
 // provider's shape. The stream stays the provider's (see Item.SourceType).
 func convertType(item *index.Item, ov MatchOverride) {
 	revertType(item)
+	if ov.SeasonOffset != 0 && item.Type == index.TypeSeries {
+		item.Episodes = shiftSeasons(item.Episodes, ov.SeasonOffset)
+		item.SeasonOffset = ov.SeasonOffset
+	}
 	target := index.MediaType(ov.AsType)
 	if target == "" || target == item.Type {
 		return
@@ -230,7 +266,8 @@ func (s *Scheduler) reapplyOverrides(ctx context.Context, items []*index.Item) {
 			continue
 		}
 		sameType := ov.AsType == "" || item.Type == index.MediaType(ov.AsType)
-		if item.ManualMatch && sameType && item.TMDBId == ov.TMDBId && (ov.TVDBId == "" || item.TVDBId == ov.TVDBId) {
+		sameSeasons := item.SeasonOffset == ov.SeasonOffset
+		if item.ManualMatch && sameType && sameSeasons && item.TMDBId == ov.TMDBId && (ov.TVDBId == "" || item.TVDBId == ov.TVDBId) {
 			continue
 		}
 		if err := s.applyOverride(ctx, item, ov); err != nil {
@@ -290,6 +327,20 @@ func (s *Scheduler) SetMatch(ctx context.Context, mediaType index.MediaType, xtr
 		ov.Season, ov.Episode = 0, 0
 	default:
 		ov.Season, ov.Episode, ov.EpisodeID = 0, 0, 0
+	}
+
+	if mediaType != index.TypeSeries || target != index.TypeSeries {
+		ov.SeasonOffset = 0
+	} else if ov.SeasonOffset != 0 {
+		if ov.SeasonOffset < -maxSeasonOffset || ov.SeasonOffset > maxSeasonOffset {
+			return nil, fmt.Errorf("season offset must be between %d and %d", -maxSeasonOffset, maxSeasonOffset)
+		}
+		// item may already carry an offset; check against provider numbering.
+		for _, ep := range item.Episodes {
+			if provider := ep.Season - item.SeasonOffset; provider > 0 && provider+ov.SeasonOffset < 1 {
+				return nil, fmt.Errorf("season offset %d would move provider season %d below season 1", ov.SeasonOffset, provider)
+			}
+		}
 	}
 
 	s.overridesMu.Lock()

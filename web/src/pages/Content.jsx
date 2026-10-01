@@ -401,10 +401,21 @@ function MatchDialog({ item, onClose, onUpdated }) {
   const [season, setSeason] = useState(firstEp ? String(firstEp.Season) : '')
   const [episode, setEpisode] = useState(firstEp ? String(firstEp.EpisodeNum) : '')
   const [filmEpisode, setFilmEpisode] = useState(String(item.stream_episode_id || providerEpisodes[0]?.EpisodeID || ''))
+  // "Provider season 1 is Sonarr season N": N = 1 + offset.
+  const currentOffset = item.season_offset || 0
+  const [firstSeason, setFirstSeason] = useState(String(1 + currentOffset))
 
   const toEpisode = providerType === 'movie' && target === 'series'
   const toFilm = providerType === 'series' && target === 'movie'
-  const missingDetails = (toEpisode && (season === '' || !episode)) || (toFilm && !filmEpisode)
+  const renumber = providerType === 'series' && target === 'series'
+  const offset = renumber && /^-?\d+$/.test(firstSeason) ? Number(firstSeason) - 1 : 0
+  const missingDetails = (toEpisode && (season === '' || !episode)) || (toFilm && !filmEpisode) ||
+    (renumber && !/^-?\d+$/.test(firstSeason))
+
+  // The provider's own season range, for the renumbering preview.
+  const providerSeasons = providerEpisodes.map(ep => ep.Season - currentOffset).filter(n => n > 0)
+  const minSeason = providerSeasons.length ? Math.min(...providerSeasons) : null
+  const maxSeason = providerSeasons.length ? Math.max(...providerSeasons) : null
 
   const search = async e => {
     e?.preventDefault()
@@ -444,6 +455,7 @@ function MatchDialog({ item, onClose, onUpdated }) {
   }
 
   const typeChange = () => {
+    if (renumber) return { season_offset: offset }
     if (target === providerType) return {}
     if (toEpisode) return { as_type: target, season: Number(season), episode: Number(episode) }
     return { as_type: target, episode_id: Number(filmEpisode) }
@@ -522,6 +534,28 @@ function MatchDialog({ item, onClose, onUpdated }) {
               </p>
             </div>
           )}
+          {renumber && (
+            <div className="space-y-1.5">
+              <label className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-steel-500">
+                Provider season 1 is season
+                <input
+                  value={firstSeason}
+                  onChange={e => setFirstSeason(e.target.value.replace(/[^\d-]/g, '').slice(0, 4))}
+                  className={`w-16 ${input}`}
+                />
+                in Sonarr
+                {minSeason !== null && offset !== 0 && (
+                  <span className="text-amber-400/80">
+                    · provider S{minSeason}–S{maxSeason} → Sonarr S{minSeason + offset}–S{maxSeason + offset}
+                  </span>
+                )}
+              </label>
+              <p className="font-mono text-[10px] text-steel-500">
+                For providers that number seasons differently from TheTVDB, e.g. only carrying a show's later channel
+                and starting again at 1. Leave at 1 if the numbers already match. Specials (season 0) are unchanged.
+              </p>
+            </div>
+          )}
           {toFilm && providerEpisodes.length > 1 && (
             <label className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-steel-500">
               Which episode is the film
@@ -559,7 +593,7 @@ function MatchDialog({ item, onClose, onUpdated }) {
           ) : results.length === 0 ? (
             <p className="px-5 py-6 font-mono text-[11px] text-steel-500">No TMDB results. Try another title, or enter an ID below.</p>
           ) : results.map(r => {
-            const current = String(r.id) === item.TMDBId && target === item.Type
+            const current = String(r.id) === item.TMDBId && target === item.Type && offset === currentOffset
             return (
               <div key={r.id} className="flex gap-3 px-5 py-2.5 items-start">
                 {r.poster

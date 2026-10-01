@@ -173,6 +173,8 @@ A manual match applies immediately and is kept across every sync and restart. It
 
 The item moves to the other tab, keeps streaming from the provider's original entry, and the change survives every sync.
 
+**Renumbering seasons.** Sonarr searches by TheTVDB's season numbers. Some providers number differently, e.g. carrying only *The Great British Bake Off*'s Channel 4 years as seasons 1–9 while TheTVDB continues from the BBC years (series 8 onwards), so nothing is found. In **Fix match** for the series, set **Provider season 1 is season 8 in Sonarr**, then click **Use this** on the current match. Every episode is then offered under TheTVDB's numbering; specials (season 0) are unchanged.
+
 ## Grace period for provider outages
 
 When a title disappears from the provider catalog (e.g. during a temporary outage), VODarr retains it in the index for a configurable number of syncs before removing its `.strm` files. This prevents Sonarr/Radarr from losing track of content during short-lived outages.

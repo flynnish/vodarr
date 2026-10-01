@@ -208,6 +208,9 @@ type matchRequest struct {
 	Season    int    `json:"season"`
 	Episode   int    `json:"episode"`
 	EpisodeID int    `json:"episode_id"`
+
+	// Optional renumbering of a provider series' seasons to TheTVDB's.
+	SeasonOffset int `json:"season_offset"`
 }
 
 // handlePutMatch sets a manual match and returns the updated item.
@@ -232,6 +235,7 @@ func (h *Handler) handlePutMatch(w http.ResponseWriter, r *http.Request) {
 	item, err := h.scheduler.SetMatch(ctx, mt, req.XtreamID, vodarrsync.MatchOverride{
 		TMDBId: req.TMDBId, TVDBId: req.TVDBId,
 		AsType: req.AsType, Season: req.Season, Episode: req.Episode, EpisodeID: req.EpisodeID,
+		SeasonOffset: req.SeasonOffset,
 	})
 	h.writeMatchResult(w, item, err)
 }

@@ -82,6 +82,12 @@ type Item struct {
 	// provider episode whose stream is the film.
 	StreamEpisodeID int `json:"stream_episode_id,omitempty"`
 
+	// SeasonOffset, set by a manual match, has been added to every episode's
+	// season number (specials, season 0, excepted) to turn the provider's
+	// numbering into TheTVDB's, which Sonarr uses. E.g. a provider that only
+	// carries a show's later channel numbers those seasons from 1.
+	SeasonOffset int `json:"season_offset,omitempty"`
+
 	// MatchVersion records which version of the title matching logic
 	// produced the external IDs, so the sync can redo stale matches.
 	MatchVersion int `json:"match_version,omitempty"`
