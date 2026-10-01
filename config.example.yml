@@ -37,6 +37,7 @@ logging:
 
 # arr:
 #   auto_search: true         # after each sync, ask arr to search for its wanted items VODarr has (default true)
+#   unmonitor_delivered: true # after replacing an imported .mkv stub with a .strm, unmonitor it in arr and rescan (default true)
 #   instances:
 #     - name: "Sonarr"
 #       type: sonarr          # "sonarr" or "radarr"

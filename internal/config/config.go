@@ -27,6 +27,10 @@ type ArrConfig struct {
 	// AutoSearch makes VODarr ask each instance, after every sync, to search
 	// for its wanted items that VODarr has. Default true.
 	AutoSearch bool `yaml:"auto_search"`
+	// UnmonitorDelivered makes VODarr unmonitor an episode/movie in arr once
+	// its .mkv stub is replaced by a .strm, so arr does not grab it again.
+	// Default true.
+	UnmonitorDelivered bool `yaml:"unmonitor_delivered"`
 }
 
 type ArrInstance struct {
@@ -191,7 +195,8 @@ func defaults() *Config {
 			Level: "info",
 		},
 		Arr: ArrConfig{
-			AutoSearch: true,
+			AutoSearch:         true,
+			UnmonitorDelivered: true,
 		},
 	}
 }

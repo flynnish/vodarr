@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/vodarr/vodarr/internal/config"
@@ -873,5 +874,49 @@ func TestExtensionListHelpers(t *testing.T) {
 	}
 	if got := removeExtension("srt, .strm,nfo,strm", "strm"); got != "srt,nfo" {
 		t.Errorf("removeExtension = %q, want srt,nfo", got)
+	}
+}
+
+func TestWebhookTellsSonarrAfterRemovingStub(t *testing.T) {
+	// After replacing the stub, VODarr unmonitors the episode and rescans
+	// the series in the Sonarr instance the webhook came from.
+	var mu sync.Mutex
+	var calls []string
+	sonarr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		w.Write([]byte(`{}`))
+	}))
+	defer sonarr.Close()
+
+	library := t.TempDir()
+	libMkv := filepath.Join(library, "Scrubs - S01E01.mkv")
+	if err := os.WriteFile(libMkv, strm.BuildMKVHeader(nil), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(strings.TrimSuffix(libMkv, ".mkv")+".strm", []byte("http://x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := minimalCfg()
+	cfg.Output.Path = t.TempDir()
+	cfg.Arr.UnmonitorDelivered = true
+	cfg.Arr.Instances = []config.ArrInstance{{Name: "Sonarr", Type: "sonarr", URL: sonarr.URL, APIKey: "k"}}
+	h := makeHandler(cfg, "")
+	body, _ := json.Marshal(map[string]interface{}{
+		"eventType":    "Download",
+		"instanceName": "Sonarr",
+		"series":       map[string]int{"id": 7},
+		"episodes":     []map[string]int{{"id": 101}},
+		"episodeFile":  map[string]string{"path": libMkv},
+	})
+	h.handleWebhook(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/webhook", bytes.NewReader(body)))
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"PUT /api/v3/episode/monitor", "POST /api/v3/command"}
+	if len(calls) != 2 || calls[0] != want[0] || calls[1] != want[1] {
+		t.Errorf("Sonarr calls = %v, want %v", calls, want)
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vodarr/vodarr/internal/arr"
 	"github.com/vodarr/vodarr/internal/config"
 	"github.com/vodarr/vodarr/internal/index"
 	"github.com/vodarr/vodarr/internal/logbuf"
@@ -685,9 +686,22 @@ func (h *Handler) handleRestart(w http.ResponseWriter, r *http.Request) {
 // Deletes the .mkv stub when a matching .strm sibling exists.
 // Always returns 200 (arr retries on non-2xx).
 func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 64<<10) // 64 KB
+	// Import payloads carry media info, custom formats and release details;
+	// 1 MB leaves ample room so a large one is never silently dropped.
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var payload struct {
-		EventType   string `json:"eventType"`
+		EventType      string `json:"eventType"`
+		InstanceName   string `json:"instanceName"`
+		ApplicationURL string `json:"applicationUrl"`
+		Series         struct {
+			ID int `json:"id"`
+		} `json:"series"`
+		Episodes []struct {
+			ID int `json:"id"`
+		} `json:"episodes"`
+		Movie struct {
+			ID int `json:"id"`
+		} `json:"movie"`
 		EpisodeFile struct {
 			Path       string `json:"path"`
 			SourcePath string `json:"sourcePath"`
@@ -698,10 +712,13 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		} `json:"movieFile"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		slog.Warn("webhook: unreadable payload, ignoring", "error", err)
 		// Return 200 even on parse errors so arr doesn't retry
 		h.writeJSON(w, map[string]string{"status": "ok"})
 		return
 	}
+	slog.Info("webhook received", "event", payload.EventType, "instance", payload.InstanceName,
+		"path", payload.EpisodeFile.Path+payload.MovieFile.Path)
 
 	// Test event from arr when adding the webhook — just acknowledge
 	if payload.EventType == "Test" {
@@ -789,8 +806,36 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	if err := os.Remove(mkvPath); err != nil {
 		slog.Error("webhook: failed to remove mkv stub", "path", mkvPath, "error", err)
+		h.writeJSON(w, map[string]string{"status": "ok"})
+		return
+	}
+	slog.Info("webhook: removed mkv stub after import", "path", mkvPath)
+
+	// Tell arr straight away instead of leaving the deleted .mkv listed until
+	// its next scheduled refresh.
+	d := arr.Delivery{SeriesID: payload.Series.ID, MovieID: payload.Movie.ID}
+	for _, ep := range payload.Episodes {
+		d.EpisodeIDs = append(d.EpisodeIDs, ep.ID)
+	}
+	arrType := "radarr"
+	if payload.EpisodeFile.Path != "" {
+		arrType = "sonarr"
+	}
+	h.cfgMu.RLock()
+	instances := h.cfg.Arr.Instances
+	unmonitor := h.cfg.Arr.UnmonitorDelivered
+	h.cfgMu.RUnlock()
+	if inst, ok := arr.PickInstance(instances, arrType, payload.InstanceName, payload.ApplicationURL); !ok {
+		slog.Warn("webhook: stub removed, but arr was not told: add this instance under Settings → Arr Integration so VODarr can rescan and unmonitor it",
+			"type", arrType, "instance", payload.InstanceName)
 	} else {
-		slog.Info("webhook: removed mkv stub after import", "path", mkvPath)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err := arr.NewSearcher().Delivered(ctx, inst, d, unmonitor); err != nil {
+			slog.Warn("webhook: could not update arr after removing stub", "instance", inst.Name, "error", err)
+		} else {
+			slog.Info("webhook: arr rescanned", "instance", inst.Name, "unmonitored", unmonitor)
+		}
 	}
 	h.writeJSON(w, map[string]string{"status": "ok"})
 }
