@@ -962,8 +962,9 @@ func (h *Handler) checkArrInstance(ctx context.Context, inst config.ArrInstance,
 	if dcResp, err := client.Do(dcReq); err == nil {
 		defer dcResp.Body.Close()
 		var dcs []struct {
-			Implementation string `json:"implementation"`
-			Fields         []struct {
+			Implementation           string `json:"implementation"`
+			RemoveCompletedDownloads bool   `json:"removeCompletedDownloads"`
+			Fields                   []struct {
 				Name  string      `json:"name"`
 				Value interface{} `json:"value"`
 			} `json:"fields"`
@@ -990,6 +991,9 @@ func (h *Handler) checkArrInstance(ctx context.Context, inst config.ArrInstance,
 					st.DownloadClientConfigured = true
 					if strings.TrimSpace(category) == "" {
 						st.Issues = append(st.Issues, "VODarr download client has no category: Sonarr and Radarr will see each other's downloads (set a different category in each)")
+					}
+					if !dc.RemoveCompletedDownloads {
+						st.Issues = append(st.Issues, "VODarr download client has Remove Completed off: finished grabs stay in the queue as \"Downloaded\" forever")
 					}
 				}
 			}
@@ -1343,7 +1347,12 @@ func (h *Handler) handleArrSetup(w http.ResponseWriter, r *http.Request) {
 				"enable":             true,
 				"protocol":           "torrent",
 				"priority":           1,
-				"tags":               []int{},
+				// Without these, arr leaves every finished grab in its queue as
+				// "Downloaded" forever: it only removes a completed torrent when
+				// the client is set to remove completed downloads.
+				"removeCompletedDownloads": true,
+				"removeFailedDownloads":    true,
+				"tags":                     []int{},
 				"fields": []map[string]interface{}{
 					{"name": "host", "value": qbitHostname},
 					{"name": "port", "value": cfg.Server.QbitPort},
