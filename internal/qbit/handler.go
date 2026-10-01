@@ -617,6 +617,10 @@ func (h *Handler) validateDescriptorURL(rawURL string) error {
 
 func (h *Handler) handleTorrentsInfo(w http.ResponseWriter, r *http.Request) {
 	filterHash := r.URL.Query().Get("hashes")
+	// Like real qBittorrent: with ?category=, list only that category (an
+	// empty value means uncategorised). Sonarr and Radarr each ask for their
+	// own, which is what keeps one's downloads out of the other's queue.
+	filterCategory, byCategory := r.URL.Query()["category"]
 
 	torrents := h.store.All()
 	type qbTorrent struct {
@@ -659,6 +663,9 @@ func (h *Handler) handleTorrentsInfo(w http.ResponseWriter, r *http.Request) {
 	var out []qbTorrent
 	for _, t := range torrents {
 		if filterHash != "" && filterHash != "all" && !strings.Contains(filterHash, t.Hash) {
+			continue
+		}
+		if byCategory && t.Category != filterCategory[0] {
 			continue
 		}
 		downloaded := int64(0)
@@ -861,10 +868,11 @@ func (h *Handler) handleSyncMaindata(w http.ResponseWriter, r *http.Request) {
 	torrentMap := make(map[string]interface{})
 	for _, t := range torrents {
 		torrentMap[t.Hash] = map[string]interface{}{
-			"name":     t.Name,
-			"state":    t.State,
-			"progress": t.Progress,
+			"name":      t.Name,
+			"state":     t.State,
+			"progress":  t.Progress,
 			"save_path": t.SavePath,
+			"category":  t.Category,
 		}
 	}
 	h.writeJSON(w, map[string]interface{}{

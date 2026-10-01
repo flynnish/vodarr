@@ -969,15 +969,27 @@ func (h *Handler) checkArrInstance(ctx context.Context, inst config.ArrInstance,
 			} `json:"fields"`
 		}
 		if json.NewDecoder(dcResp.Body).Decode(&dcs) == nil {
+			catField, _ := arrCategoryField(inst.Type)
 			for _, dc := range dcs {
 				if dc.Implementation != "QBittorrent" {
 					continue
 				}
+				isVODarr := false
+				category := ""
 				for _, f := range dc.Fields {
 					if f.Name == "port" {
 						if v, ok := f.Value.(float64); ok && int(v) == qbitPort {
-							st.DownloadClientConfigured = true
+							isVODarr = true
 						}
+					}
+					if f.Name == catField {
+						category, _ = f.Value.(string)
+					}
+				}
+				if isVODarr {
+					st.DownloadClientConfigured = true
+					if strings.TrimSpace(category) == "" {
+						st.Issues = append(st.Issues, "VODarr download client has no category: Sonarr and Radarr will see each other's downloads (set a different category in each)")
 					}
 				}
 			}
@@ -985,6 +997,17 @@ func (h *Handler) checkArrInstance(ctx context.Context, inst config.ArrInstance,
 	}
 
 	return st
+}
+
+// arrCategoryField returns the qBittorrent download client field an arr app
+// keeps its category in, and the category auto-configure assigns. VODarr
+// lists each app only the torrents in its own category, so the two apps must
+// use different categories.
+func arrCategoryField(arrType string) (field, value string) {
+	if arrType == "radarr" {
+		return "movieCategory", "vodarr-movies"
+	}
+	return "tvCategory", "vodarr-tv"
 }
 
 type arrSetupRequest struct {
@@ -1309,6 +1332,9 @@ func (h *Handler) handleArrSetup(w http.ResponseWriter, r *http.Request) {
 			results["downloadClient"] = map[string]interface{}{"success": true, "skipped": "already configured"}
 		} else {
 			qbitHostname := h.requestHost(r)
+			// Each app lists only torrents in its own category, so Sonarr and
+			// Radarr must use different ones, under the field each app reads.
+			catField, catValue := arrCategoryField(inst.Type)
 			dc := map[string]interface{}{
 				"name":               "VODarr",
 				"implementation":     "QBittorrent",
@@ -1325,7 +1351,7 @@ func (h *Handler) handleArrSetup(w http.ResponseWriter, r *http.Request) {
 					{"name": "urlBase", "value": ""},
 					{"name": "username", "value": ""},
 					{"name": "password", "value": ""},
-					{"name": "category", "value": "vodarr"},
+					{"name": catField, "value": catValue},
 					{"name": "recentTvPriority", "value": 0},
 					{"name": "olderTvPriority", "value": 0},
 					{"name": "initialState", "value": 0},
