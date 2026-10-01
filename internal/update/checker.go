@@ -12,8 +12,10 @@ import (
 
 const (
 	cacheTTL  = 6 * time.Hour
-	apiURL    = "https://api.github.com/repos/firestaerter3/vodarr/releases"
-	imageBase = "ghcr.io/firestaerter3/vodarr"
+	// This fork checks its own releases: following the upstream repo would
+	// offer upstream builds as "updates" and undo the fork's changes.
+	apiURL    = "https://api.github.com/repos/flynnish/vodarr/releases"
+	imageBase = "ghcr.io/flynnish/vodarr"
 	stableTag = "latest"
 	betaTag   = "downloadbeta"
 )

@@ -636,7 +636,7 @@ func TestGetUpdateReturnsResult(t *testing.T) {
 	stub := &stubChecker{result: update.Result{
 		LatestVersion:   "1.5.0",
 		UpdateAvailable: true,
-		ImageTag:        "ghcr.io/firestaerter3/vodarr:latest",
+		ImageTag:        "ghcr.io/flynnish/vodarr:latest",
 	}}
 	h := NewHandler(index.New(), nil, nil, nil, nil, cfg, "", "", "", "1.2.0", stub)
 
