@@ -96,3 +96,23 @@ func TestSeriesFilmOfferedToRadarr(t *testing.T) {
 		t.Errorf("descriptor = %v, want movie from series streaming episode 9001", desc)
 	}
 }
+
+func TestDescriptorYearMatchesReleaseTitle(t *testing.T) {
+	// No Year, only a release date: the release title says 2026, so the
+	// descriptor (which names the download Radarr parses) must too.
+	idx := index.New()
+	idx.Replace([]*index.Item{{
+		Type: index.TypeMovie, XtreamID: 77, Name: "Scary Movie",
+		ReleaseDate: "2026-06-12", IMDBId: "tt32093575", ContainerExt: "mp4",
+	}})
+	h := NewHandler(idx, "", "http://vodarr:9091", noopURLBuilder{})
+
+	if body := getBody(t, h, "/api?t=movie&imdbid=tt32093575"); !strings.Contains(body, "Scary.Movie.2026.WEB-DL.mp4") {
+		t.Fatalf("release title missing year:\n%s", body)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "/api?t=get&id=77&type=movie", nil))
+	if desc := descriptorFrom(t, w.Body.Bytes()); desc["year"] != "2026" {
+		t.Errorf("descriptor year = %v, want 2026", desc["year"])
+	}
+}

@@ -299,11 +299,17 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) {
 		// files after the matched title instead.
 		cleanName = sanitizeNameForTitle(found.CanonicalName)
 	}
+	// Same year as the release title (buildTitle): the download is named and
+	// filed with it, and Radarr needs it to tell same-titled films apart.
+	year := found.Year
+	if year == "" && len(found.ReleaseDate) >= 4 {
+		year = found.ReleaseDate[:4]
+	}
 	desc := map[string]interface{}{
 		"xtream_id":     found.XtreamID,
 		"type":          string(found.Type),
 		"name":          cleanName,
-		"year":          found.Year,
+		"year":          year,
 		"imdb_id":       found.IMDBId,
 		"tvdb_id":       found.TVDBId,
 		"tmdb_id":       found.TMDBId,
