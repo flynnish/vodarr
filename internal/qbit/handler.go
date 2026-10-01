@@ -418,7 +418,7 @@ func (h *Handler) processURL(rawURL, savePath, category string) error {
 func (h *Handler) processDescriptor(desc itemDescriptor, hash string, savePath, category string) error {
 	t := &Torrent{
 		Hash:         hash,
-		Name:         desc.Name,
+		Name:         torrentName(desc),
 		SavePath:     savePath,
 		Category:     category,
 		State:        StateDownloading,
@@ -441,6 +441,18 @@ func (h *Handler) processDescriptor(desc itemDescriptor, hash string, savePath, 
 		go h.processStrm(desc, hash)
 	}
 	return nil
+}
+
+// torrentName is the name reported to arr for a download. Radarr parses it
+// before consulting its grab history, and a bare title shared by several
+// movies in its library ("Scary Movie": 2000 and 2026) makes it give up with
+// "Expected one movie, but found 2" and never import. With the year
+// ("Scary Movie (2000)") the parse finds exactly one movie.
+func torrentName(desc itemDescriptor) string {
+	if desc.Type == "movie" && desc.Year != "" && !strings.Contains(desc.Name, desc.Year) {
+		return fmt.Sprintf("%s (%s)", desc.Name, desc.Year)
+	}
+	return desc.Name
 }
 
 // movieStreamURL is the stream for a movie descriptor. A provider series

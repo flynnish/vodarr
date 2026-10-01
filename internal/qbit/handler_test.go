@@ -223,8 +223,9 @@ func TestTorrentsAddTorrentFile(t *testing.T) {
 	if len(hash) != 40 {
 		t.Errorf("hash = %q (len %d), want 40-char SHA1 hex", hash, len(hash))
 	}
-	if torrents[0].Name != "Test Movie" {
-		t.Errorf("Name = %q, want Test Movie", torrents[0].Name)
+	// The year is part of the name so Radarr can tell same-titled films apart.
+	if torrents[0].Name != "Test Movie (2023)" {
+		t.Errorf("Name = %q, want Test Movie (2023)", torrents[0].Name)
 	}
 }
 
