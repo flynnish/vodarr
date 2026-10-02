@@ -101,3 +101,18 @@ func TestFinishImportGoneVersusNotVisible(t *testing.T) {
 		t.Errorf("NearestExisting = %q, want %q", got, root)
 	}
 }
+
+func TestFromOutput(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "data", "strm")
+	cases := map[string]bool{
+		filepath.Join(output, "tv", "Show", "Season 01", "Show.S01E01.WEB-DL.mkv"): true,
+		filepath.Join(filepath.Dir(output), "downloads", "Real.Show.S01E01.mkv"):   false, // another client
+		filepath.Join(output+"-other", "x.mkv"):                                    false, // prefix trick
+		"":                                                                         false,
+	}
+	for src, want := range cases {
+		if got := FromOutput(src, output); got != want {
+			t.Errorf("FromOutput(%q) = %v, want %v", src, got, want)
+		}
+	}
+}

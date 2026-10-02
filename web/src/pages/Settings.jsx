@@ -153,6 +153,7 @@ function RepairImports() {
           {r.error ? <span className="text-red-400">{r.error}</span> : (
             <>
               <span className="text-lime-400">{r.repaired} repaired</span> · {r.done} already done
+              {r.other > 0 && <span className="text-steel-500"> · {r.other} from other download clients (skipped)</span>}
               {r.not_visible > 0 && <span className="text-amber-400"> · {r.not_visible} not visible (library not mounted into VODarr at arr's path)</span>}
               {r.no_strm > 0 && <span className="text-amber-400"> · {r.no_strm} without a .strm (VODarr's output folder path differs between containers)</span>}
               {r.failed > 0 && <span className="text-red-400"> · {r.failed} failed (see log)</span>}

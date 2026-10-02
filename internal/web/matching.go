@@ -291,6 +291,11 @@ func (h *Handler) handleArrRepair(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	finish := func(libMkv, sourceMkv string) error {
+		// arr's import history covers every download client; only imports
+		// whose source was VODarr's output folder are VODarr's to finish.
+		if !strm.FromOutput(sourceMkv, outputPath) {
+			return strm.ErrNotOurs
+		}
 		return strm.FinishImport(libMkv, sourceMkv, outputPath)
 	}
 	searcher := arr.NewSearcher()

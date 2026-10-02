@@ -753,6 +753,15 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// arr sends this webhook for every import, from any download client.
+	// When it says where the file came from and that is not VODarr's output
+	// folder, the import is not VODarr's: leave it alone without warnings.
+	if sourcePath != "" && !strm.FromOutput(sourcePath, outputPath) {
+		slog.Debug("webhook: import from another download client, ignoring", "source", sourcePath)
+		h.writeJSON(w, map[string]string{"status": "ok"})
+		return
+	}
+
 	if err := strm.FinishImport(mkvPath, sourcePath, outputPath); err != nil {
 		logFinishFailure("webhook", mkvPath, sourcePath, err)
 		h.writeJSON(w, map[string]string{"status": "ok"})

@@ -20,6 +20,7 @@ type RepairResult struct {
 	Done       int    `json:"done"`        // already finished (or renamed/removed since)
 	NotVisible int    `json:"not_visible"` // library not mounted into VODarr
 	NoStrm     int    `json:"no_strm"`     // no .strm to place (output folder path mismatch)
+	Other      int    `json:"other"`       // imports from other download clients, skipped
 	Failed     int    `json:"failed"`
 	Error      string `json:"error,omitempty"`
 }
@@ -82,6 +83,9 @@ func (s *Searcher) RepairImports(ctx context.Context, inst config.ArrInstance, f
 			seen[imported] = true
 			err := finish(imported, dataValue(rec.Data, "droppedPath"))
 			switch {
+			case errors.Is(err, strm.ErrNotOurs):
+				res.Other++
+				continue // another download client's import
 			case errors.Is(err, strm.ErrNotStub):
 				continue // a real download from another client, not ours
 			case err == nil:
@@ -127,6 +131,7 @@ func (s *Searcher) RepairImports(ctx context.Context, inst config.ArrInstance, f
 		}
 	}
 	slog.Info("repair past imports", "instance", inst.Name, "imports", res.Imports, "repaired", res.Repaired,
-		"already_done", res.Done, "not_visible", res.NotVisible, "no_strm", res.NoStrm, "failed", res.Failed)
+		"already_done", res.Done, "not_visible", res.NotVisible, "no_strm", res.NoStrm, "failed", res.Failed,
+		"other_clients", res.Other)
 	return res
 }

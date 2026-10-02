@@ -23,7 +23,24 @@ var (
 	ErrNotStub = errors.New("imported file is not a VODarr stub")
 	// ErrNoStrm: there is no .strm to put in its place.
 	ErrNoStrm = errors.New("no .strm to place next to the imported file")
+	// ErrNotOurs: the import came from another download client (its source
+	// is outside VODarr's output folder); it is none of VODarr's business.
+	ErrNotOurs = errors.New("import did not come from VODarr")
 )
+
+// FromOutput reports whether sourceMkv (arr's path for the downloaded file)
+// lies inside outputPath, i.e. the download was VODarr's.
+func FromOutput(sourceMkv, outputPath string) bool {
+	if sourceMkv == "" || outputPath == "" || !filepath.IsAbs(sourceMkv) {
+		return false
+	}
+	absOutput, err := filepath.Abs(outputPath)
+	if err != nil {
+		return false
+	}
+	sep := string(filepath.Separator)
+	return strings.HasPrefix(filepath.Clean(sourceMkv)+sep, absOutput+sep)
+}
 
 // FinishImport turns arr's import of a VODarr stub into a playable library
 // entry: it copies the .strm VODarr wrote beside the source stub
