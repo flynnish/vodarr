@@ -795,7 +795,7 @@ func logFinishFailure(source, mkvPath, sourcePath string, err error) {
 	switch {
 	case errors.Is(err, strm.ErrNotVisible):
 		slog.Warn(source+": imported file not found; mount the arr library into VODarr at the same path arr uses",
-			"path", mkvPath)
+			"path", mkvPath, "nearest_visible_folder", strm.NearestExisting(mkvPath))
 	case errors.Is(err, strm.ErrGone):
 		slog.Info(source+": imported file already gone, nothing to do", "path", mkvPath)
 	case errors.Is(err, strm.ErrNotStub):

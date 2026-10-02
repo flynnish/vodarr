@@ -43,10 +43,10 @@ func FinishImport(libMkv, sourceMkv, outputPath string) error {
 		return fmt.Errorf("not an absolute .mkv path: %q", libMkv)
 	}
 	if _, err := os.Stat(libMkv); err != nil {
-		if _, dirErr := os.Stat(filepath.Dir(libMkv)); dirErr != nil {
-			return ErrNotVisible
+		if libraryVisible(libMkv) {
+			return ErrGone
 		}
-		return ErrGone
+		return ErrNotVisible
 	}
 	if !IsStub(libMkv) {
 		return ErrNotStub
@@ -69,6 +69,44 @@ func FinishImport(libMkv, sourceMkv, outputPath string) error {
 		return fmt.Errorf("remove stub: %w", err)
 	}
 	return nil
+}
+
+// libraryVisible reports whether the library a missing file belonged to is
+// visible here at all. arr lays files out as root/Show/Season NN/file or
+// root/Movie/file, so the root is at most three levels up. If any of those
+// folders exists the library is mounted and the file has merely gone
+// (finished, renamed, or its show or season removed since), which is common
+// for old history entries; only when none exists is the mount missing.
+func libraryVisible(path string) bool {
+	dir := filepath.Dir(path)
+	for i := 0; i < 3; i++ {
+		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return false
+}
+
+// NearestExisting returns the deepest existing folder above path, showing
+// where a missing mount stops (e.g. "/media" when "/media/tv/strm" is not
+// mounted).
+func NearestExisting(path string) string {
+	dir := filepath.Dir(path)
+	for {
+		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return dir
+		}
+		dir = parent
+	}
 }
 
 // IsStub reports whether path is an .mkv stub written by Writer: a Matroska

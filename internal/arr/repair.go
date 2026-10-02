@@ -113,7 +113,8 @@ func (s *Searcher) RepairImports(ctx context.Context, inst config.ArrInstance, f
 
 	if notVisibleExample != "" {
 		slog.Warn("repair: library not visible to VODarr; mount it at the same path arr uses",
-			"instance", inst.Name, "count", res.NotVisible, "example", notVisibleExample)
+			"instance", inst.Name, "count", res.NotVisible, "example", notVisibleExample,
+			"nearest_visible_folder", strm.NearestExisting(notVisibleExample))
 	}
 	for seriesID, eps := range episodes {
 		if err := s.Delivered(ctx, inst, Delivery{SeriesID: seriesID, EpisodeIDs: eps}, unmonitor); err != nil {

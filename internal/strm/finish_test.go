@@ -81,3 +81,23 @@ func TestFinishImportReasons(t *testing.T) {
 		t.Errorf("foreign source: %v, want ErrNoStrm", err)
 	}
 }
+
+func TestFinishImportGoneVersusNotVisible(t *testing.T) {
+	// Library mounted, but an old history entry's season folder was renamed
+	// or removed since: that is "gone", not "not visible".
+	root := filepath.Join(t.TempDir(), "media", "tv", "strm")
+	if err := os.MkdirAll(filepath.Join(root, "Bake Off (2010)"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(root, "Bake Off (2010)", "Season 17", "Bake Off - S17E01.mkv")
+	if err := FinishImport(old, "", t.TempDir()); !errors.Is(err, ErrGone) {
+		t.Errorf("removed season folder: %v, want ErrGone", err)
+	}
+	removedShow := filepath.Join(root, "Gone Show", "Season 1", "Gone Show - S01E01.mkv")
+	if err := FinishImport(removedShow, "", t.TempDir()); !errors.Is(err, ErrGone) {
+		t.Errorf("removed show folder: %v, want ErrGone", err)
+	}
+	if got := NearestExisting(removedShow); got != root {
+		t.Errorf("NearestExisting = %q, want %q", got, root)
+	}
+}
