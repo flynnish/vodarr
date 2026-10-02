@@ -116,3 +116,29 @@ func TestDescriptorYearMatchesReleaseTitle(t *testing.T) {
 		t.Errorf("descriptor year = %v, want 2026", desc["year"])
 	}
 }
+
+func TestEpisodeTitleCarriesSeriesYear(t *testing.T) {
+	// Without the year, Sonarr's scene mapping hands "Scrubs" to the 2001
+	// show and the search for Scrubs (2026) discards the release.
+	idx := index.New()
+	idx.Replace([]*index.Item{
+		{Type: index.TypeSeries, XtreamID: 1, Name: "Scrubs", CanonicalName: "Scrubs", TVDBId: "465690",
+			ReleaseDate: "2026-02-25", Episodes: []index.EpisodeItem{{EpisodeID: 10, Season: 1, EpisodeNum: 1, Ext: "mp4"}}},
+		{Type: index.TypeSeries, XtreamID: 2, Name: "1883", CanonicalName: "1883", TVDBId: "403245",
+			Year: "2021", Episodes: []index.EpisodeItem{{EpisodeID: 20, Season: 1, EpisodeNum: 1}}},
+		{Type: index.TypeSeries, XtreamID: 3, Name: "No Year Show", TVDBId: "999",
+			Episodes: []index.EpisodeItem{{EpisodeID: 30, Season: 1, EpisodeNum: 1}}},
+	})
+	h := NewHandler(idx, "", "http://vodarr:9091", noopURLBuilder{})
+
+	cases := map[string]string{
+		"/api?t=tvsearch&tvdbid=465690": "<title>Scrubs.2026.S01E01.WEB-DL.mp4</title>",
+		"/api?t=tvsearch&tvdbid=403245": "<title>1883.2021.S01E01.WEB-DL.mkv</title>",
+		"/api?t=tvsearch&tvdbid=999":    "<title>No.Year.Show.S01E01.WEB-DL.mkv</title>",
+	}
+	for url, want := range cases {
+		if body := getBody(t, h, url); !strings.Contains(body, want) {
+			t.Errorf("%s: want %s in\n%s", url, want, body)
+		}
+	}
+}
