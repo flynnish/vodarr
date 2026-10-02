@@ -1012,6 +1012,67 @@ func (h *Handler) checkArrInstance(ctx context.Context, inst config.ArrInstance,
 	return st
 }
 
+// fixDownloadClient brings an existing VODarr download client up to what
+// VODarr needs, changing nothing else: Remove Completed and Remove Failed on
+// (otherwise finished grabs stay in arr's queue forever), and a category if
+// it has none (otherwise Sonarr and Radarr see each other's downloads).
+func fixDownloadClient(do func(method, url string, body []byte) (*http.Response, error), baseURL string, id int, arrType string) map[string]interface{} {
+	fail := func(err string) map[string]interface{} {
+		return map[string]interface{}{"success": false, "error": err}
+	}
+	if id < 0 {
+		return fail("VODarr download client not found")
+	}
+	url := fmt.Sprintf("%s/api/v3/downloadclient/%d", baseURL, id)
+	resp, err := do(http.MethodGet, url, nil)
+	if err != nil {
+		return fail(err.Error())
+	}
+	var dc map[string]interface{}
+	err = json.NewDecoder(resp.Body).Decode(&dc)
+	resp.Body.Close()
+	if err != nil {
+		return fail("failed to parse download client")
+	}
+
+	var changed []string
+	for _, key := range []string{"removeCompletedDownloads", "removeFailedDownloads"} {
+		if on, _ := dc[key].(bool); !on {
+			dc[key] = true
+			changed = append(changed, key)
+		}
+	}
+	catField, catValue := arrCategoryField(arrType)
+	if fields, ok := dc["fields"].([]interface{}); ok {
+		for _, f := range fields {
+			m, ok := f.(map[string]interface{})
+			if !ok || m["name"] != catField {
+				continue
+			}
+			if v, _ := m["value"].(string); strings.TrimSpace(v) == "" {
+				m["value"] = catValue
+				changed = append(changed, catField)
+			}
+		}
+	}
+	if len(changed) == 0 {
+		return map[string]interface{}{"success": true, "skipped": "already configured"}
+	}
+
+	body, _ := json.Marshal(dc)
+	putResp, err := do(http.MethodPut, url, body)
+	if err != nil {
+		return fail(err.Error())
+	}
+	defer putResp.Body.Close()
+	if putResp.StatusCode >= 300 {
+		msg, _ := io.ReadAll(io.LimitReader(putResp.Body, 512))
+		return fail(fmt.Sprintf("HTTP %d: %s", putResp.StatusCode, strings.TrimSpace(string(msg))))
+	}
+	slog.Info("arr setup: updated existing VODarr download client", "changed", changed)
+	return map[string]interface{}{"success": true, "updated": changed}
+}
+
 // arrCategoryField returns the qBittorrent download client field an arr app
 // keeps its category in, and the category auto-configure assigns. VODarr
 // lists each app only the torrents in its own category, so the two apps must
@@ -1342,7 +1403,8 @@ func (h *Handler) handleArrSetup(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if dcExists {
-			results["downloadClient"] = map[string]interface{}{"success": true, "skipped": "already configured"}
+			// An existing client may predate settings VODarr now needs.
+			results["downloadClient"] = fixDownloadClient(doWithRetry, baseURL, vodarrDownloadClientID, inst.Type)
 		} else {
 			qbitHostname := h.requestHost(r)
 			// Each app lists only torrents in its own category, so Sonarr and
