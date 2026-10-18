@@ -107,7 +107,7 @@ func TestDescriptorYearMatchesReleaseTitle(t *testing.T) {
 	}})
 	h := NewHandler(idx, "", "http://vodarr:9091", noopURLBuilder{})
 
-	if body := getBody(t, h, "/api?t=movie&imdbid=tt32093575"); !strings.Contains(body, "Scary.Movie.2026.WEB-DL.mp4") {
+	if body := getBody(t, h, "/api?t=movie&imdbid=tt32093575"); !strings.Contains(body, "Scary.Movie.2026.ENGLISH.WEB-DL.mp4") {
 		t.Fatalf("release title missing year:\n%s", body)
 	}
 	w := httptest.NewRecorder()
@@ -132,9 +132,9 @@ func TestEpisodeTitleCarriesSeriesYear(t *testing.T) {
 	h := NewHandler(idx, "", "http://vodarr:9091", noopURLBuilder{})
 
 	cases := map[string]string{
-		"/api?t=tvsearch&tvdbid=465690": "<title>Scrubs.2026.S01E01.WEB-DL.mp4</title>",
-		"/api?t=tvsearch&tvdbid=403245": "<title>1883.2021.S01E01.WEB-DL.mkv</title>",
-		"/api?t=tvsearch&tvdbid=999":    "<title>No.Year.Show.S01E01.WEB-DL.mkv</title>",
+		"/api?t=tvsearch&tvdbid=465690": "<title>Scrubs.2026.S01E01.ENGLISH.WEB-DL.mp4</title>",
+		"/api?t=tvsearch&tvdbid=403245": "<title>1883.2021.S01E01.ENGLISH.WEB-DL.mkv</title>",
+		"/api?t=tvsearch&tvdbid=999":    "<title>No.Year.Show.S01E01.ENGLISH.WEB-DL.mkv</title>",
 	}
 	for url, want := range cases {
 		if body := getBody(t, h, url); !strings.Contains(body, want) {

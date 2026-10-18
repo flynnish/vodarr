@@ -78,7 +78,7 @@ func TestReleaseTitlesCarryGroupAndLanguage(t *testing.T) {
 	tv := getBody(t, h, "/api?t=tvsearch&tvdbid=465690")
 	for _, want := range []string{
 		"<title>Scrubs.2026.S01E01.SPANISH.WEB-DL-ESSeries.mp4</title>",
-		"<title>Scrubs.2026.S01E01.WEB-DL-ENSeries.mp4</title>", // English needs no token
+		"<title>Scrubs.2026.S01E01.ENGLISH.WEB-DL-ENSeries.mp4</title>",
 		`name="language" value="es"`,
 		`name="language" value="en"`,
 	} {

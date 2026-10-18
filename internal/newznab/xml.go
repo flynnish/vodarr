@@ -120,6 +120,25 @@ func itemLanguage(item *index.Item) string {
 	return categoryLanguage(item.Category)
 }
 
+// defaultLanguage is assumed when neither a stream's name nor its provider
+// group names a language.
+const defaultLanguage = "en"
+
+// releaseLanguage is the language a release is labelled with: from the
+// stream's name or group (itemLanguage), else a Dutch audio marker, else
+// English. Labelling English explicitly matters: arr treats an unlabelled
+// release as the title's original language, so an English dub of a Spanish
+// show would otherwise count as Spanish.
+func releaseLanguage(item *index.Item) string {
+	if lang := itemLanguage(item); lang != "" {
+		return lang
+	}
+	if nlGespokenRe.MatchString(item.Name) {
+		return "nl"
+	}
+	return defaultLanguage
+}
+
 // groupFolds transliterates common accented letters for release group names.
 var groupFolds = strings.NewReplacer(
 	"á", "a", "à", "a", "â", "a", "ä", "a", "ã", "a", "å", "a",
@@ -170,8 +189,8 @@ func webDL(item *index.Item) string {
 
 // langTitleTokens maps ISO 639-1 language codes to the uppercase title tokens
 // recognised by Sonarr/Radarr custom format rules (e.g. "DUTCH", "GERMAN").
-// English is omitted — it is the default and needs no explicit token.
 var langTitleTokens = map[string]string{
+	"en": "ENGLISH",
 	"nl": "DUTCH",
 	"de": "GERMAN",
 	"fr": "FRENCH",
@@ -201,8 +220,8 @@ var langTitleTokens = map[string]string{
 }
 
 // langTitleToken returns the Sonarr/Radarr-compatible uppercase title token
-// for a given ISO 639-1 code (e.g. "nl" → "DUTCH"). Returns "" for English
-// and any unmapped code.
+// for a given ISO 639-1 code (e.g. "nl" → "DUTCH", "en" → "ENGLISH").
+// Returns "" for any unmapped code.
 func langTitleToken(iso639 string) string {
 	return langTitleTokens[iso639]
 }
@@ -474,10 +493,8 @@ func episodeToRSS(serverURL string, series *index.Item, ep index.EpisodeItem) It
 	// custom format rules (which scan the title, not the language attr) can
 	// match the language. Skip if sanitizeNameForTitle already added the token.
 	token := ""
-	if lang := itemLanguage(series); lang != "" {
-		if t := langTitleToken(lang); t != "" && !strings.Contains(seriesSafe, t) {
-			token = t
-		}
+	if t := langTitleToken(releaseLanguage(series)); t != "" && !strings.Contains(seriesSafe, t) {
+		token = t
 	}
 	var title string
 	if token != "" {
@@ -525,11 +542,7 @@ func episodeToRSS(serverURL string, series *index.Item, ep index.EpisodeItem) It
 	if fourKRe.MatchString(series.Name) {
 		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "resolution", Value: "2160p"})
 	}
-	if lang := itemLanguage(series); lang != "" {
-		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "language", Value: lang})
-	} else if nlGespokenRe.MatchString(series.Name) {
-		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "language", Value: "nl"})
-	}
+	rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "language", Value: releaseLanguage(series)})
 
 	return rssItem
 }
@@ -601,11 +614,7 @@ func itemToRSS(serverURL string, item *index.Item) Item {
 	if fourKRe.MatchString(item.Name) {
 		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "resolution", Value: "2160p"})
 	}
-	if lang := itemLanguage(item); lang != "" {
-		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "language", Value: lang})
-	} else if nlGespokenRe.MatchString(item.Name) {
-		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "language", Value: "nl"})
-	}
+	rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "language", Value: releaseLanguage(item)})
 
 	return rssItem
 }
@@ -646,10 +655,8 @@ func buildTitle(item *index.Item) string {
 	// Inject language token so Sonarr/Radarr custom format rules can match.
 	// Skip if sanitizeNameForTitle already added the token (e.g. from GESPROKEN).
 	token := ""
-	if lang := itemLanguage(item); lang != "" {
-		if t := langTitleToken(lang); t != "" && !strings.Contains(safe, t) {
-			token = t
-		}
+	if t := langTitleToken(releaseLanguage(item)); t != "" && !strings.Contains(safe, t) {
+		token = t
 	}
 
 	if year != "" {
