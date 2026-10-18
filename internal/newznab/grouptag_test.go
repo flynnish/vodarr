@@ -18,6 +18,19 @@ func TestCategoryLanguage(t *testing.T) {
 		"Películas Español":    "es",
 		"Deutsch Serien":       "de",
 		"Nederlands gesproken": "nl",
+		"German Series":        "de",
+		"Series German":        "de",
+		"GER | Series":         "de",
+		"DEU - Serien":         "de",
+		"DE Series":            "de",
+		"GER Movies":           "de",
+		"Germany Series":       "de",
+		"Deutschland Filme":    "de",
+		"ENG | Series":         "en",
+		"UK Drama":             "en",
+		"Series Drama":         "", // names no language: English by default elsewhere
+		"NEW Series":           "", // a word, not a known code
+		"TOP Movies":           "",
 		"4K | Movies":          "", // not a language
 		"NF | Netflix":         "",
 		"VIP | Series":         "",
@@ -90,5 +103,29 @@ func TestReleaseTitlesCarryGroupAndLanguage(t *testing.T) {
 	movie := getBody(t, h, "/api?t=movie&imdbid=tt1375666")
 	if want := "<title>Inception.2010.SPANISH.WEB-DL-PeliculasEspanol.mkv</title>"; !strings.Contains(movie, want) {
 		t.Errorf("movie feed missing %s:\n%s", want, movie)
+	}
+}
+
+func TestDubbedCopyLabelledByItsGroup(t *testing.T) {
+	// One English show in two groups: the original and a German dub. Each
+	// release carries its own group's language.
+	idx := index.New()
+	idx.Replace([]*index.Item{
+		{Type: index.TypeSeries, XtreamID: 1, Name: "Suits", CanonicalName: "Suits", TVDBId: "247808",
+			Year: "2011", Category: "Series Drama",
+			Episodes: []index.EpisodeItem{{EpisodeID: 10, Season: 1, EpisodeNum: 1, Ext: "mkv"}}},
+		{Type: index.TypeSeries, XtreamID: 2, Name: "Suits", CanonicalName: "Suits", TVDBId: "247808",
+			Year: "2011", Category: "GER | Serien",
+			Episodes: []index.EpisodeItem{{EpisodeID: 20, Season: 1, EpisodeNum: 1, Ext: "mkv"}}},
+	})
+	h := NewHandler(idx, "", "http://vodarr:9091", noopURLBuilder{})
+	body := getBody(t, h, "/api?t=tvsearch&tvdbid=247808")
+	for _, want := range []string{
+		"<title>Suits.2011.S01E01.ENGLISH.WEB-DL-SeriesDrama.mkv</title>",
+		"<title>Suits.2011.S01E01.GERMAN.WEB-DL-GERSerien.mkv</title>",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %s in\n%s", want, body)
+		}
 	}
 }

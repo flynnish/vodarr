@@ -56,6 +56,14 @@ var iptvLangMap = map[string]string{
 	"JP": "ja", // Japanese
 	"KR": "ko", // Korean
 	"CN": "zh", // Chinese
+
+	// Three-letter codes (ISO 639-2 and common provider spellings).
+	"ENG": "en", "GER": "de", "DEU": "de", "SPA": "es", "ESP": "es", "LAT": "es",
+	"FRE": "fr", "FRA": "fr", "ITA": "it", "NLD": "nl", "DUT": "nl", "POR": "pt",
+	"SWE": "sv", "DAN": "da", "NOR": "no", "FIN": "fi", "POL": "pl", "RUS": "ru",
+	"TUR": "tr", "HUN": "hu", "CZE": "cs", "CES": "cs", "RON": "ro", "RUM": "ro",
+	"BUL": "bg", "HRV": "hr", "GRE": "el", "ELL": "el", "HEB": "he", "ARA": "ar",
+	"JPN": "ja", "KOR": "ko", "CHI": "zh", "ZHO": "zh", "HIN": "hi",
 }
 
 // detectIPTVLanguage returns the ISO 639-1 language code for a stream name
@@ -72,11 +80,14 @@ func detectIPTVLanguage(name string) string {
 // categoryCodeRe captures a leading 2-3 letter code in a provider group name
 // followed by a separator, e.g. "ES | Películas", "[DE] Filme", "FR: Séries",
 // "NL - Films", "EN ▸ Series".
-var categoryCodeRe = regexp.MustCompile(`^\s*(?:[\[(]\s*([A-Za-z]{2,3})\s*[\])]|([A-Za-z]{2,3})\s*[|┃:\-–—▸►•/])`)
+// Also a bare code followed by a word ("DE Series", "GER Movies"); only codes
+// in iptvLangMap count, so "NEW Series" or "TOP Movies" are not languages.
+var categoryCodeRe = regexp.MustCompile(`^\s*(?:[\[(]\s*([A-Za-z]{2,3})\s*[\])]|([A-Za-z]{2,3})(?:\s*[|┃:\-–—▸►•/]|\s+\S))`)
 
 // languageWordRe matches a language named in full in a provider group name
 // ("Spanish Movies", "Películas Español", "Deutsch Serien").
-var languageWordRe = regexp.MustCompile(`(?i)\b(english|spanish|espa[nñ]ol|castellano|latino|german|deutsch|french|fran[cç]ais|dutch|nederlands|vlaams|italian|italiano|portuguese|portugu[eê]s|swedish|svenska|danish|dansk|norwegian|norsk|finnish|suomi|polish|polski|russian|turkish|t[uü]rk[cç]e|hungarian|magyar|czech|romanian|greek|hebrew|arabic|japanese|korean|chinese|hindi)\b`)
+// Country names count too ("Germany Series", "Deutschland").
+var languageWordRe = regexp.MustCompile(`(?i)\b(english|spanish|espa[nñ]ol|castellano|latino|german|deutsch|french|fran[cç]ais|dutch|nederlands|vlaams|italian|italiano|portuguese|portugu[eê]s|swedish|svenska|danish|dansk|norwegian|norsk|finnish|suomi|polish|polski|russian|turkish|t[uü]rk[cç]e|hungarian|magyar|czech|romanian|greek|hebrew|arabic|japanese|korean|chinese|hindi|germany|deutschland|spain|espa[nñ]a|france|netherlands|holland|italy|italia|portugal|brazil|brasil|sweden|sverige|denmark|danmark|norway|norge|finland|poland|polska|turkey|t[uü]rkiye|greece|japan|korea|china|india)\b`)
 
 var languageWords = map[string]string{
 	"english": "en", "spanish": "es", "espanol": "es", "español": "es", "castellano": "es", "latino": "es",
@@ -88,6 +99,12 @@ var languageWords = map[string]string{
 	"turkçe": "tr", "türkce": "tr", "hungarian": "hu", "magyar": "hu", "czech": "cs", "romanian": "ro",
 	"greek": "el", "hebrew": "he", "arabic": "ar", "japanese": "ja", "korean": "ko", "chinese": "zh",
 	"hindi": "hi",
+	"germany": "de", "deutschland": "de", "spain": "es", "espana": "es", "españa": "es",
+	"france": "fr", "netherlands": "nl", "holland": "nl", "italy": "it", "italia": "it",
+	"portugal": "pt", "brazil": "pt", "brasil": "pt", "sweden": "sv", "sverige": "sv",
+	"denmark": "da", "danmark": "da", "norway": "no", "norge": "no", "finland": "fi",
+	"poland": "pl", "polska": "pl", "turkey": "tr", "turkiye": "tr", "türkiye": "tr",
+	"greece": "el", "japan": "ja", "korea": "ko", "china": "zh", "india": "hi",
 }
 
 // categoryLanguage returns the ISO 639-1 language a provider group name
