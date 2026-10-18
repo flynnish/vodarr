@@ -160,6 +160,10 @@ Providers often carry the same show or movie in several language groups (e.g. `E
 
 Saving takes effect at once: items from excluded groups disappear from searches immediately, with no restart. They are left out of every later sync without going through the grace period, and VODarr does not delete any files for them. The choice is stored in `config.yml` as `sync.excluded_categories`.
 
+## Language and provider group in release names
+
+Each release name carries the provider group it comes from as its **release group** (the part after the last dash), e.g. `Scrubs.2026.S01E01.SPANISH.WEB-DL-ESSeries.mp4`, and a language word when the stream's name or its group names a language (`ES | Películas`, `[DE] Filme`, `Spanish Movies`, `┃NL┃ Show`; English needs none). Sonarr and Radarr show the release group in search results, so copies of a title from different groups can be told apart, and **custom formats** can score them: a *Release Group* condition (e.g. regex `^EN`) to prefer or avoid groups, or a *Language* condition to prefer a language.
+
 ## Manual matching
 
 If a title is matched to the wrong show or movie (or not matched at all), open **Content**, find it, and click **Fix match**. Search TMDB and pick the right entry, or type a TMDB ID directly. For series you can also set the **TVDB ID**, which is what Sonarr searches by, for shows TMDB has no TVDB link for.

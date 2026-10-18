@@ -69,6 +69,105 @@ func detectIPTVLanguage(name string) string {
 	return iptvLangMap[strings.ToUpper(m[1])]
 }
 
+// categoryCodeRe captures a leading 2-3 letter code in a provider group name
+// followed by a separator, e.g. "ES | Películas", "[DE] Filme", "FR: Séries",
+// "NL - Films", "EN ▸ Series".
+var categoryCodeRe = regexp.MustCompile(`^\s*(?:[\[(]\s*([A-Za-z]{2,3})\s*[\])]|([A-Za-z]{2,3})\s*[|┃:\-–—▸►•/])`)
+
+// languageWordRe matches a language named in full in a provider group name
+// ("Spanish Movies", "Películas Español", "Deutsch Serien").
+var languageWordRe = regexp.MustCompile(`(?i)\b(english|spanish|espa[nñ]ol|castellano|latino|german|deutsch|french|fran[cç]ais|dutch|nederlands|vlaams|italian|italiano|portuguese|portugu[eê]s|swedish|svenska|danish|dansk|norwegian|norsk|finnish|suomi|polish|polski|russian|turkish|t[uü]rk[cç]e|hungarian|magyar|czech|romanian|greek|hebrew|arabic|japanese|korean|chinese|hindi)\b`)
+
+var languageWords = map[string]string{
+	"english": "en", "spanish": "es", "espanol": "es", "español": "es", "castellano": "es", "latino": "es",
+	"german": "de", "deutsch": "de", "french": "fr", "francais": "fr", "français": "fr",
+	"dutch": "nl", "nederlands": "nl", "vlaams": "nl", "italian": "it", "italiano": "it",
+	"portuguese": "pt", "portugues": "pt", "português": "pt", "swedish": "sv", "svenska": "sv",
+	"danish": "da", "dansk": "da", "norwegian": "no", "norsk": "no", "finnish": "fi", "suomi": "fi",
+	"polish": "pl", "polski": "pl", "russian": "ru", "turkish": "tr", "turkce": "tr", "türkçe": "tr",
+	"turkçe": "tr", "türkce": "tr", "hungarian": "hu", "magyar": "hu", "czech": "cs", "romanian": "ro",
+	"greek": "el", "hebrew": "he", "arabic": "ar", "japanese": "ja", "korean": "ko", "chinese": "zh",
+	"hindi": "hi",
+}
+
+// categoryLanguage returns the ISO 639-1 language a provider group name
+// names, as a code prefix or a word, or "" when it names none. Unknown codes
+// ("4K | …", "NF | Netflix", "VIP | …") are ignored.
+func categoryLanguage(category string) string {
+	if category == "" {
+		return ""
+	}
+	if lang := detectIPTVLanguage(category); lang != "" {
+		return lang
+	}
+	if m := categoryCodeRe.FindStringSubmatch(category); m != nil {
+		if lang := iptvLangMap[strings.ToUpper(m[1]+m[2])]; lang != "" {
+			return lang
+		}
+	}
+	if m := languageWordRe.FindStringSubmatch(category); m != nil {
+		return languageWords[strings.ToLower(m[1])]
+	}
+	return ""
+}
+
+// itemLanguage is the language of an item's stream: from a code in its own
+// name ("┃NL┃ Show"), else from its provider group ("ES | Películas").
+func itemLanguage(item *index.Item) string {
+	if lang := detectIPTVLanguage(item.Name); lang != "" {
+		return lang
+	}
+	return categoryLanguage(item.Category)
+}
+
+// groupFolds transliterates common accented letters for release group names.
+var groupFolds = strings.NewReplacer(
+	"á", "a", "à", "a", "â", "a", "ä", "a", "ã", "a", "å", "a",
+	"é", "e", "è", "e", "ê", "e", "ë", "e",
+	"í", "i", "ì", "i", "î", "i", "ï", "i",
+	"ó", "o", "ò", "o", "ô", "o", "ö", "o", "õ", "o", "ø", "o",
+	"ú", "u", "ù", "u", "û", "u", "ü", "u",
+	"ñ", "n", "ç", "c", "ß", "ss",
+	"Á", "A", "À", "A", "Â", "A", "Ä", "A", "Ã", "A", "Å", "A",
+	"É", "E", "È", "E", "Ê", "E", "Ë", "E",
+	"Í", "I", "Ì", "I", "Î", "I", "Ï", "I",
+	"Ó", "O", "Ò", "O", "Ô", "O", "Ö", "O", "Õ", "O", "Ø", "O",
+	"Ú", "U", "Ù", "U", "Û", "U", "Ü", "U",
+	"Ñ", "N", "Ç", "C",
+)
+
+// maxReleaseGroup bounds the release group so titles stay readable.
+const maxReleaseGroup = 30
+
+// releaseGroup turns a provider group name into a release group, the part
+// of a release title after the last dash ("…WEB-DL-ESPeliculas"). Sonarr and
+// Radarr show it in search results and custom formats can score it, so two
+// copies of a title from different groups can be told apart and ranked.
+// Words are joined with capitalised first letters, keeping only ASCII
+// letters and digits, which is all arr's release group parsing accepts.
+func releaseGroup(category string) string {
+	var b strings.Builder
+	for _, word := range strings.FieldsFunc(groupFolds.Replace(category), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
+	}) {
+		b.WriteString(strings.ToUpper(word[:1]) + word[1:])
+	}
+	g := b.String()
+	if len(g) > maxReleaseGroup {
+		g = g[:maxReleaseGroup]
+	}
+	return g
+}
+
+// webDL is the source tag ending a release title, with the item's provider
+// group as release group when it has one: "WEB-DL" or "WEB-DL-ESPeliculas".
+func webDL(item *index.Item) string {
+	if g := releaseGroup(item.Category); g != "" {
+		return "WEB-DL-" + g
+	}
+	return "WEB-DL"
+}
+
 // langTitleTokens maps ISO 639-1 language codes to the uppercase title tokens
 // recognised by Sonarr/Radarr custom format rules (e.g. "DUTCH", "GERMAN").
 // English is omitted — it is the default and needs no explicit token.
@@ -98,6 +197,7 @@ var langTitleTokens = map[string]string{
 	"ja": "JAPANESE",
 	"ko": "KOREAN",
 	"zh": "CHINESE",
+	"hi": "HINDI",
 }
 
 // langTitleToken returns the Sonarr/Radarr-compatible uppercase title token
@@ -374,16 +474,16 @@ func episodeToRSS(serverURL string, series *index.Item, ep index.EpisodeItem) It
 	// custom format rules (which scan the title, not the language attr) can
 	// match the language. Skip if sanitizeNameForTitle already added the token.
 	token := ""
-	if lang := detectIPTVLanguage(series.Name); lang != "" {
+	if lang := itemLanguage(series); lang != "" {
 		if t := langTitleToken(lang); t != "" && !strings.Contains(seriesSafe, t) {
 			token = t
 		}
 	}
 	var title string
 	if token != "" {
-		title = fmt.Sprintf("%s.%s.%s.WEB-DL.%s", seriesSafe, epTag, token, ext)
+		title = fmt.Sprintf("%s.%s.%s.%s.%s", seriesSafe, epTag, token, webDL(series), ext)
 	} else {
-		title = fmt.Sprintf("%s.%s.WEB-DL.%s", seriesSafe, epTag, ext)
+		title = fmt.Sprintf("%s.%s.%s.%s", seriesSafe, epTag, webDL(series), ext)
 	}
 
 	rssItem := Item{
@@ -425,7 +525,7 @@ func episodeToRSS(serverURL string, series *index.Item, ep index.EpisodeItem) It
 	if fourKRe.MatchString(series.Name) {
 		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "resolution", Value: "2160p"})
 	}
-	if lang := detectIPTVLanguage(series.Name); lang != "" {
+	if lang := itemLanguage(series); lang != "" {
 		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "language", Value: lang})
 	} else if nlGespokenRe.MatchString(series.Name) {
 		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "language", Value: "nl"})
@@ -501,7 +601,7 @@ func itemToRSS(serverURL string, item *index.Item) Item {
 	if fourKRe.MatchString(item.Name) {
 		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "resolution", Value: "2160p"})
 	}
-	if lang := detectIPTVLanguage(item.Name); lang != "" {
+	if lang := itemLanguage(item); lang != "" {
 		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "language", Value: lang})
 	} else if nlGespokenRe.MatchString(item.Name) {
 		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "language", Value: "nl"})
@@ -546,7 +646,7 @@ func buildTitle(item *index.Item) string {
 	// Inject language token so Sonarr/Radarr custom format rules can match.
 	// Skip if sanitizeNameForTitle already added the token (e.g. from GESPROKEN).
 	token := ""
-	if lang := detectIPTVLanguage(item.Name); lang != "" {
+	if lang := itemLanguage(item); lang != "" {
 		if t := langTitleToken(lang); t != "" && !strings.Contains(safe, t) {
 			token = t
 		}
@@ -554,12 +654,12 @@ func buildTitle(item *index.Item) string {
 
 	if year != "" {
 		if token != "" {
-			return fmt.Sprintf("%s.%s.%s.WEB-DL.%s", safe, year, token, ext)
+			return fmt.Sprintf("%s.%s.%s.%s.%s", safe, year, token, webDL(item), ext)
 		}
-		return fmt.Sprintf("%s.%s.WEB-DL.%s", safe, year, ext)
+		return fmt.Sprintf("%s.%s.%s.%s", safe, year, webDL(item), ext)
 	}
 	if token != "" {
-		return fmt.Sprintf("%s.%s.WEB-DL.%s", safe, token, ext)
+		return fmt.Sprintf("%s.%s.%s.%s", safe, token, webDL(item), ext)
 	}
-	return fmt.Sprintf("%s.WEB-DL.%s", safe, ext)
+	return fmt.Sprintf("%s.%s.%s", safe, webDL(item), ext)
 }
