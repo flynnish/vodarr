@@ -12,6 +12,7 @@ output:
   movies_dir: "movies"     # Subfolder for movies
   series_dir: "tv"         # Subfolder for TV series
   mode: "strm"             # "strm" (default): write .strm pointer files; "download": download actual media files
+  # default_language: original  # releases naming no language: "original" (arr assumes the title's original language) or a code like "en"
   # max_concurrent_downloads: 1  # download mode only; max simultaneous downloads (1-5, default 1)
   # download_delay: "30s"        # pause between consecutive downloads to look like normal viewing
   # bandwidth_limit: ""          # max download speed e.g. "20M" (MB/s), "500K" (KB/s); empty = unlimited

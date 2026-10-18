@@ -351,17 +351,17 @@ func TestBuildTitle(t *testing.T) {
 	}{
 		{
 			&index.Item{Name: "Blade Runner 2049", Year: "2017", ContainerExt: "mkv"},
-			"Blade.Runner.2049.2017.ENGLISH.WEB-DL.mkv",
+			"Blade.Runner.2049.2017.WEB-DL.mkv",
 		},
 		{
 			&index.Item{Name: "No Year", Year: "", ContainerExt: "mp4"},
-			"No.Year.ENGLISH.WEB-DL.mp4",
+			"No.Year.WEB-DL.mp4",
 		},
 		// Year field is empty but ReleaseDate has a year — buildTitle must use it.
 		// This covers the sync fix that populates Year from ReleaseDate for series.
 		{
 			&index.Item{Name: "Release Date Only", Year: "", ReleaseDate: "2019-03-22", ContainerExt: "mkv"},
-			"Release.Date.Only.2019.ENGLISH.WEB-DL.mkv",
+			"Release.Date.Only.2019.WEB-DL.mkv",
 		},
 		// IPTV prefix stripping + language token injection.
 		// The prefix is removed from the name; the language token is injected
@@ -387,17 +387,17 @@ func TestBuildTitle(t *testing.T) {
 		// Dash year stripped (year already provided via item.Year).
 		{
 			&index.Item{Name: "Some Movie - 2021", Year: "2021", ContainerExt: "mkv"},
-			"Some.Movie.2021.ENGLISH.WEB-DL.mkv",
+			"Some.Movie.2021.WEB-DL.mkv",
 		},
 		// Bracket year stripped.
 		{
 			&index.Item{Name: "Some Movie [2021]", Year: "2021", ContainerExt: "mkv"},
-			"Some.Movie.2021.ENGLISH.WEB-DL.mkv",
+			"Some.Movie.2021.WEB-DL.mkv",
 		},
 		// Parenthesised year stripped.
 		{
 			&index.Item{Name: "Some Movie (2021)", Year: "2021", ContainerExt: "mkv"},
-			"Some.Movie.2021.ENGLISH.WEB-DL.mkv",
+			"Some.Movie.2021.WEB-DL.mkv",
 		},
 		// NL GESPROKEN replaced with DUTCH.
 		{
@@ -411,12 +411,12 @@ func TestBuildTitle(t *testing.T) {
 		// HEVC kept in title (quality profile parsing).
 		{
 			&index.Item{Name: "The Matrix HEVC", Year: "1999", ContainerExt: "mkv"},
-			"The.Matrix.HEVC.1999.ENGLISH.WEB-DL.mkv",
+			"The.Matrix.HEVC.1999.WEB-DL.mkv",
 		},
 		// 4K kept in title.
 		{
 			&index.Item{Name: "Inception 4K - 2010", Year: "2010", ContainerExt: "mkv"},
-			"Inception.4K.2010.ENGLISH.WEB-DL.mkv",
+			"Inception.4K.2010.WEB-DL.mkv",
 		},
 	}
 	for _, c := range cases {
@@ -479,7 +479,7 @@ func TestQualityAttrs(t *testing.T) {
 
 	noAttr(t, plainItems, "video_codec")
 	noAttr(t, plainItems, "resolution")
-	checkAttr(t, plainItems, "language", "en") // nothing named: English by default
+	noAttr(t, plainItems, "language") // nothing named: original language (unlabelled)
 	noAttr(t, hevcItems, "resolution") // HEVC ≠ 4K
 	noAttr(t, fourKItems, "video_codec")
 }
@@ -504,8 +504,8 @@ func TestLangTitleTokenInEpisodeTitles(t *testing.T) {
 		// assume the title's original language)
 		{"┃UK┃ British Show", "ENGLISH", "DUTCH"},
 		{"┃US┃ American Show", "ENGLISH", "DUTCH"},
-		// Plain name → English by default
-		{"Breaking Bad", "ENGLISH", "DUTCH"},
+		// Plain name → unlabelled (arr assumes the original language)
+		{"Breaking Bad", "", "ENGLISH"},
 		// NL GESPROKEN form (no IPTV prefix) → DUTCH via sanitizeNameForTitle,
 		// not doubled and not also ENGLISH
 		{"Lieve Mama (NL GESPROKEN)", "DUTCH", "ENGLISH"},
@@ -602,5 +602,11 @@ func TestIPTVLanguageInRSSItems(t *testing.T) {
 	checkLang(t, buildEpisodeRSSItems("http://localhost", []*index.Item{nlSeries}, 0, 0), "nl")
 	checkLang(t, buildEpisodeRSSItems("http://localhost", []*index.Item{deSeries}, 0, 0), "de")
 	checkLang(t, buildMovieRSSItems("http://localhost", []*index.Item{frMovie}), "fr")
-	checkLang(t, buildEpisodeRSSItems("http://localhost", []*index.Item{plainSeries}, 0, 0), "en") // English by default
+	for _, item := range buildEpisodeRSSItems("http://localhost", []*index.Item{plainSeries}, 0, 0) {
+		for _, attr := range item.Attrs {
+			if attr.Name == "language" {
+				t.Errorf("unlabelled series: unexpected language attr %q", attr.Value)
+			}
+		}
+	}
 }

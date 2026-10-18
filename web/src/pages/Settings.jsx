@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react'
 const DEFAULT = {
   xtream: { url: '', username: '', password: '' },
   tmdb: { api_key: '', tvdb_api_key: '' },
-  output: { path: '/data/strm', movies_dir: 'movies', series_dir: 'tv', mode: 'strm', max_concurrent_downloads: 1, download_delay: '30s', bandwidth_limit: '' },
+  output: { path: '/data/strm', movies_dir: 'movies', series_dir: 'tv', mode: 'strm', max_concurrent_downloads: 1, download_delay: '30s', bandwidth_limit: '', default_language: 'original' },
   sync: { interval: '6h', on_startup: true, parallelism: 10, title_cleanup_patterns: [] },
   server: { newznab_port: 9091, qbit_port: 9092, web_port: 9090 },
   logging: { level: 'info' },
@@ -843,6 +843,31 @@ export default function Settings() {
               >
                 <option value="strm">strm — stream from provider</option>
                 <option value="download">download — save files to disk</option>
+              </select>
+            </Field>
+            <Field
+              label="Default Language"
+              hint="For releases whose stream name and provider group name no language. 'Original language' leaves them unlabelled so Sonarr/Radarr assume each show's or film's own original language; pick one language to label them all with it instead. A group that names a language ('ES | Películas', 'Germany Series') always wins."
+            >
+              <select
+                value={cfg.output.default_language || 'original'}
+                onChange={e => set('output.default_language', e.target.value)}
+                className="w-full px-3 py-2 bg-void-800 border border-void-600 rounded font-mono text-[13px] text-steel-300"
+              >
+                <option value="original">Original language (default)</option>
+                <option value="en">English</option>
+                <option value="nl">Dutch</option>
+                <option value="de">German</option>
+                <option value="fr">French</option>
+                <option value="es">Spanish</option>
+                <option value="it">Italian</option>
+                <option value="pt">Portuguese</option>
+                <option value="sv">Swedish</option>
+                <option value="da">Danish</option>
+                <option value="no">Norwegian</option>
+                <option value="fi">Finnish</option>
+                <option value="pl">Polish</option>
+                <option value="tr">Turkish</option>
               </select>
             </Field>
             {cfg.output.mode === 'download' && (

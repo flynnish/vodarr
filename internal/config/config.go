@@ -59,6 +59,11 @@ type OutputConfig struct {
 	MaxConcurrentDownloads int    `yaml:"max_concurrent_downloads"` // download mode only; default 1
 	DownloadDelay          string `yaml:"download_delay"`           // pause between downloads; Go duration (default "30s")
 	BandwidthLimit         string `yaml:"bandwidth_limit"`          // max download speed e.g. "20M" (MB/s); empty = unlimited
+	// DefaultLanguage labels releases whose stream name and provider group
+	// name no language: "original" (default) leaves them unlabelled, so arr
+	// assumes the title's original language; or an ISO 639-1 code ("en",
+	// "de", ...) to label them all with that one language.
+	DefaultLanguage string `yaml:"default_language"`
 
 	// Parsed values (not from YAML directly)
 	ParsedDownloadDelay  time.Duration `yaml:"-"`
@@ -179,6 +184,7 @@ func defaults() *Config {
 			Mode:                   "strm",
 			MaxConcurrentDownloads: 1,
 			DownloadDelay:          "30s",
+			DefaultLanguage:        "original",
 		},
 		Sync: SyncConfig{
 			Interval:    "6h",
@@ -252,6 +258,13 @@ func (c *Config) validate() error {
 	if c.Output.Mode == "" {
 		c.Output.Mode = "strm"
 	}
+	switch c.Output.DefaultLanguage {
+	case "", "none": // older spellings
+		c.Output.DefaultLanguage = "original"
+	}
+	if dl := c.Output.DefaultLanguage; dl != "original" && !isLanguageCode(dl) {
+		return fmt.Errorf("output.default_language must be \"original\" or a two-letter language code (e.g. en, de), got %q", dl)
+	}
 	if c.Output.Mode == "download" {
 		if c.Output.MaxConcurrentDownloads < 1 {
 			c.Output.MaxConcurrentDownloads = 1
@@ -282,6 +295,12 @@ func (c *Config) validate() error {
 	}
 
 	return nil
+}
+
+// isLanguageCode reports whether s looks like an ISO 639-1 code: two
+// lowercase letters.
+func isLanguageCode(s string) bool {
+	return len(s) == 2 && s[0] >= 'a' && s[0] <= 'z' && s[1] >= 'a' && s[1] <= 'z'
 }
 
 // parseBandwidth parses a human-friendly bandwidth string like "20M" (20 MB/s),

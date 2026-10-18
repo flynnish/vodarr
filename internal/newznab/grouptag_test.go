@@ -107,8 +107,9 @@ func TestReleaseTitlesCarryGroupAndLanguage(t *testing.T) {
 }
 
 func TestDubbedCopyLabelledByItsGroup(t *testing.T) {
-	// One English show in two groups: the original and a German dub. Each
-	// release carries its own group's language.
+	// One English show in two groups: the original and a German dub. The
+	// German group's copy is labelled German; the original's group names no
+	// language, so it is left to arr's original-language assumption.
 	idx := index.New()
 	idx.Replace([]*index.Item{
 		{Type: index.TypeSeries, XtreamID: 1, Name: "Suits", CanonicalName: "Suits", TVDBId: "247808",
@@ -121,11 +122,40 @@ func TestDubbedCopyLabelledByItsGroup(t *testing.T) {
 	h := NewHandler(idx, "", "http://vodarr:9091", noopURLBuilder{})
 	body := getBody(t, h, "/api?t=tvsearch&tvdbid=247808")
 	for _, want := range []string{
-		"<title>Suits.2011.S01E01.ENGLISH.WEB-DL-SeriesDrama.mkv</title>",
+		"<title>Suits.2011.S01E01.WEB-DL-SeriesDrama.mkv</title>",
 		"<title>Suits.2011.S01E01.GERMAN.WEB-DL-GERSerien.mkv</title>",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %s in\n%s", want, body)
+		}
+	}
+}
+
+func TestDefaultLanguageSetting(t *testing.T) {
+	defer SetDefaultLanguage("original")
+	plain := &index.Item{Type: index.TypeMovie, XtreamID: 1, Name: "Film", Year: "2020", ContainerExt: "mkv"}
+	spanish := &index.Item{Type: index.TypeMovie, XtreamID: 2, Name: "Film", Year: "2020", ContainerExt: "mkv", Category: "ES | Películas"}
+
+	SetDefaultLanguage("de")
+	if got := buildTitle(plain); got != "Film.2020.GERMAN.WEB-DL.mkv" {
+		t.Errorf("default de: %q", got)
+	}
+	if got := buildTitle(spanish); got != "Film.2020.SPANISH.WEB-DL-ESPeliculas.mkv" {
+		t.Errorf("a named group still wins: %q", got)
+	}
+
+	SetDefaultLanguage("en")
+	if got := buildTitle(plain); got != "Film.2020.ENGLISH.WEB-DL.mkv" {
+		t.Errorf("default en: %q", got)
+	}
+
+	SetDefaultLanguage("original")
+	if got := buildTitle(plain); got != "Film.2020.WEB-DL.mkv" {
+		t.Errorf("default original: %q", got)
+	}
+	for _, a := range buildMovieRSSItems("http://localhost", []*index.Item{plain})[0].Attrs {
+		if a.Name == "language" {
+			t.Errorf("default original: unexpected language attr %q", a.Value)
 		}
 	}
 }

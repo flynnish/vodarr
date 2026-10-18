@@ -98,7 +98,7 @@ var languageWords = map[string]string{
 	"polish": "pl", "polski": "pl", "russian": "ru", "turkish": "tr", "turkce": "tr", "türkçe": "tr",
 	"turkçe": "tr", "türkce": "tr", "hungarian": "hu", "magyar": "hu", "czech": "cs", "romanian": "ro",
 	"greek": "el", "hebrew": "he", "arabic": "ar", "japanese": "ja", "korean": "ko", "chinese": "zh",
-	"hindi": "hi",
+	"hindi":   "hi",
 	"germany": "de", "deutschland": "de", "spain": "es", "espana": "es", "españa": "es",
 	"france": "fr", "netherlands": "nl", "holland": "nl", "italy": "it", "italia": "it",
 	"portugal": "pt", "brazil": "pt", "brasil": "pt", "sweden": "sv", "sverige": "sv",
@@ -138,12 +138,27 @@ func itemLanguage(item *index.Item) string {
 }
 
 // defaultLanguage is assumed when neither a stream's name nor its provider
-// group names a language.
-const defaultLanguage = "en"
+// group names a language. "" (the default, "original") leaves such releases
+// unlabelled, and Sonarr/Radarr then assume the title's original language.
+// Set once at startup from output.default_language (SetDefaultLanguage).
+var defaultLanguage = ""
+
+// SetDefaultLanguage sets the language for releases that name none: an ISO
+// 639-1 code to label them all with it, or "original" (also "none" or "")
+// to leave them unlabelled. Call before serving.
+func SetDefaultLanguage(code string) {
+	code = strings.ToLower(strings.TrimSpace(code))
+	switch code {
+	case "original", "none":
+		code = ""
+	}
+	defaultLanguage = code
+}
 
 // releaseLanguage is the language a release is labelled with: from the
-// stream's name or group (itemLanguage), else a Dutch audio marker, else
-// English. Labelling English explicitly matters: arr treats an unlabelled
+// stream's name or group (itemLanguage), else a Dutch audio marker, else the
+// configured default language ("" by default: unlabelled, so arr assumes
+// the title's original language). A fixed default matters: arr treats an unlabelled
 // release as the title's original language, so an English dub of a Spanish
 // show would otherwise count as Spanish.
 func releaseLanguage(item *index.Item) string {
@@ -559,7 +574,9 @@ func episodeToRSS(serverURL string, series *index.Item, ep index.EpisodeItem) It
 	if fourKRe.MatchString(series.Name) {
 		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "resolution", Value: "2160p"})
 	}
-	rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "language", Value: releaseLanguage(series)})
+	if lang := releaseLanguage(series); lang != "" {
+		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "language", Value: lang})
+	}
 
 	return rssItem
 }
@@ -631,7 +648,9 @@ func itemToRSS(serverURL string, item *index.Item) Item {
 	if fourKRe.MatchString(item.Name) {
 		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "resolution", Value: "2160p"})
 	}
-	rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "language", Value: releaseLanguage(item)})
+	if lang := releaseLanguage(item); lang != "" {
+		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "language", Value: lang})
+	}
 
 	return rssItem
 }

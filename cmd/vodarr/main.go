@@ -102,6 +102,7 @@ func main() {
 	}
 
 	// 2C: Pass APIKey from config; xc satisfies URLBuilder for on-demand size probing
+	newznab.SetDefaultLanguage(cfg.Output.DefaultLanguage)
 	newznabHandler := newznab.NewHandler(idx, cfg.Server.APIKey, newznabSrvURL, xc)
 
 	// Download manager: only created when output.mode == "download"

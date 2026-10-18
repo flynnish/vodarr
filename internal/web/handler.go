@@ -276,6 +276,7 @@ type outputConfigResp struct {
 	MaxConcurrentDownloads int    `json:"max_concurrent_downloads"`
 	DownloadDelay          string `json:"download_delay"`
 	BandwidthLimit         string `json:"bandwidth_limit"`
+	DefaultLanguage        string `json:"default_language"`
 }
 
 type syncConfigResp struct {
@@ -318,6 +319,7 @@ func (h *Handler) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			MaxConcurrentDownloads: cfg.Output.MaxConcurrentDownloads,
 			DownloadDelay:          cfg.Output.DownloadDelay,
 			BandwidthLimit:         cfg.Output.BandwidthLimit,
+			DefaultLanguage:        cfg.Output.DefaultLanguage,
 		},
 		Sync: syncConfigResp{
 			Interval:             cfg.Sync.Interval,
@@ -371,6 +373,7 @@ type putConfigRequest struct {
 		MaxConcurrentDownloads int    `json:"max_concurrent_downloads"`
 		DownloadDelay          string `json:"download_delay"`
 		BandwidthLimit         string `json:"bandwidth_limit"`
+		DefaultLanguage        string `json:"default_language"`
 	} `json:"output"`
 	Sync struct {
 		Interval             string   `json:"interval"`
@@ -429,6 +432,9 @@ func (h *Handler) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		newCfg.Output.DownloadDelay = req.Output.DownloadDelay
 	}
 	newCfg.Output.BandwidthLimit = req.Output.BandwidthLimit
+	if req.Output.DefaultLanguage != "" { // older UIs do not send it
+		newCfg.Output.DefaultLanguage = req.Output.DefaultLanguage
+	}
 	newCfg.Sync.Interval = req.Sync.Interval
 	newCfg.Sync.OnStartup = req.Sync.OnStartup
 	if req.Sync.Parallelism != 0 {
