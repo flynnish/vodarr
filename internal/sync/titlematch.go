@@ -189,10 +189,31 @@ func (s *Scheduler) filterBySeasonCount(ctx context.Context, cands []tmdb.TVSear
 // searchTVDBSeries finds the TVDB series that best matches an IPTV series,
 // preferring exact title matches (TVDB disambiguates shared titles as
 // "Scrubs (2026)") and breaking ties by year.
-func (s *Scheduler) searchTVDBSeries(ctx context.Context, title string, year int) (*tvdb.SeriesResult, error) {
-	results, err := s.tvdb.SearchSeriesAll(ctx, title)
-	if err != nil || len(results) == 0 {
+//
+// The show is often already identified by TMDB/IMDB (TMDB just has no TVDB
+// link for it). Results that TheTVDB links to a different IMDB or TMDB ID,
+// or whose year is more than one off, are another show of the same name
+// (Normal People 2021 is not Normal People 2020) and are never used:
+// leaving the TVDB ID empty is better than borrowing another show's, which
+// makes Sonarr offer this show's episodes as that show's.
+func (s *Scheduler) searchTVDBSeries(ctx context.Context, title string, year int, imdbID, tmdbID string) (*tvdb.SeriesResult, error) {
+	all, err := s.tvdb.SearchSeriesAll(ctx, title)
+	if err != nil || len(all) == 0 {
 		return nil, err
+	}
+	var results []tvdb.SeriesResult
+	for _, r := range all {
+		if (imdbID != "" && r.IMDBId != "" && r.IMDBId != imdbID) ||
+			(tmdbID != "" && r.TMDBId != "" && r.TMDBId != tmdbID) {
+			continue // TheTVDB says this is another show
+		}
+		if y := tvdbYear(r); year > 0 && y > 0 && absInt(y-year) > 1 {
+			continue
+		}
+		results = append(results, r)
+	}
+	if len(results) == 0 {
+		return nil, nil
 	}
 
 	want := normalizeSeriesTitle(title)
@@ -207,15 +228,47 @@ func (s *Scheduler) searchTVDBSeries(ctx context.Context, title string, year int
 	}
 	years := make([]int, len(exact))
 	for i, r := range exact {
-		years[i] = yearOf(r.Year)
-		if years[i] == 0 {
-			// TVDB sometimes leaves year empty but keeps it in the name.
-			if m := yearInParensRe.FindStringSubmatch(r.Name); m != nil {
-				years[i], _ = strconv.Atoi(m[1])
-			}
-		}
+		years[i] = tvdbYear(r)
 	}
 	return &exact[closestYearIndex(years, year)], nil
+}
+
+// conflictingTVDBIDs returns the TVDB IDs that cached series for different
+// TMDB shows share. Such an ID was borrowed by an older TVDB name search
+// (Normal People 2021 given Normal People 2020's ID); its series are
+// re-matched so each gets its own, or none. Manual matches are left out:
+// the user chose those.
+func conflictingTVDBIDs(cached map[string]*index.Item) map[string]bool {
+	shows := make(map[string]map[string]bool) // TVDB ID → TMDB IDs
+	for _, it := range cached {
+		if it.Type != index.TypeSeries || it.TVDBId == "" || it.TMDBId == "" || it.ManualMatch {
+			continue
+		}
+		if shows[it.TVDBId] == nil {
+			shows[it.TVDBId] = make(map[string]bool)
+		}
+		shows[it.TVDBId][it.TMDBId] = true
+	}
+	out := make(map[string]bool)
+	for tvdbID, tmdbIDs := range shows {
+		if len(tmdbIDs) > 1 {
+			out[tvdbID] = true
+		}
+	}
+	return out
+}
+
+// tvdbYear is a TVDB result's first-aired year, or 0. TVDB sometimes leaves
+// the year empty but keeps it in the name ("Scrubs (2026)").
+func tvdbYear(r tvdb.SeriesResult) int {
+	if y := yearOf(r.Year); y > 0 {
+		return y
+	}
+	if m := yearInParensRe.FindStringSubmatch(r.Name); m != nil {
+		y, _ := strconv.Atoi(m[1])
+		return y
+	}
+	return 0
 }
 
 // searchTMDBMovie finds the TMDB movie that best matches an IPTV movie.

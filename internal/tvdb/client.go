@@ -32,6 +32,13 @@ type SeriesResult struct {
 	TVDBID int    // numeric TVDB ID
 	Name   string // series name as returned by TVDB
 	Year   string // first-aired year, "" when TVDB has none
+	IMDBId string // from TVDB's remote IDs, "" when it lists none
+	TMDBId string // from TVDB's remote IDs, "" when it lists none
+}
+
+// SetBaseURL overrides the TVDB API base URL. Used in tests.
+func (c *Client) SetBaseURL(u string) {
+	c.baseURL = u
 }
 
 func NewClient(apiKey string) *Client {
@@ -85,6 +92,10 @@ func (c *Client) SearchSeriesAll(ctx context.Context, title string) ([]SeriesRes
 			TVDBIDStr string `json:"tvdb_id"`
 			Name      string `json:"name"`
 			Year      string `json:"year"`
+			RemoteIDs []struct {
+				ID         string `json:"id"`
+				SourceName string `json:"sourceName"`
+			} `json:"remote_ids"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
@@ -97,7 +108,17 @@ func (c *Client) SearchSeriesAll(ctx context.Context, title string) ([]SeriesRes
 		if err != nil || id <= 0 {
 			continue
 		}
-		out = append(out, SeriesResult{TVDBID: id, Name: d.Name, Year: d.Year})
+		r := SeriesResult{TVDBID: id, Name: d.Name, Year: d.Year}
+		for _, rid := range d.RemoteIDs {
+			src := strings.ToLower(rid.SourceName)
+			switch {
+			case strings.Contains(src, "imdb"):
+				r.IMDBId = rid.ID
+			case strings.Contains(src, "moviedb") || strings.Contains(src, "tmdb"):
+				r.TMDBId = rid.ID
+			}
+		}
+		out = append(out, r)
 	}
 	return out, nil
 }

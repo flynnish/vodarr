@@ -177,3 +177,19 @@ func TestLoginCalledOnlyOnce(t *testing.T) {
 		t.Errorf("login called %d times, want 1", loginCalls)
 	}
 }
+
+func TestSearchSeriesAllParsesRemoteIDs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[{"tvdb_id":"371806","name":"Normal People","year":"2020",
+			"remote_ids":[{"id":"tt9059760","type":2,"sourceName":"IMDB"},{"id":"89905","type":12,"sourceName":"TheMovieDB.com"}]}]}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(srv)
+	got, err := c.SearchSeriesAll(context.Background(), "Normal People")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("got %v, %v", got, err)
+	}
+	if got[0].IMDBId != "tt9059760" || got[0].TMDBId != "89905" {
+		t.Errorf("remote IDs = %q / %q, want tt9059760 / 89905", got[0].IMDBId, got[0].TMDBId)
+	}
+}

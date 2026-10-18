@@ -861,6 +861,11 @@ func (s *Scheduler) enrich(ctx context.Context, items []*index.Item, cachedByKey
 		return items, nil
 	}
 
+	conflicting := conflictingTVDBIDs(cachedByKey)
+	if len(conflicting) > 0 {
+		slog.Info("re-matching series that share a TVDB ID with a different show", "tvdb_ids", len(conflicting))
+	}
+
 	total := len(items)
 
 	parallelism := s.cfg.Sync.Parallelism
@@ -917,6 +922,9 @@ func (s *Scheduler) enrich(ctx context.Context, items []*index.Item, cachedByKey
 					// went through title matching, so they keep their cache.
 					ci, ok := cachedByKey[key]
 					stale := ok && item.TMDBId == "" && ci.MatchVersion < matchVersion
+					// A TVDB ID shared with an entry for a different TMDB show
+					// was borrowed by an older TVDB name search: re-match.
+					stale = stale || (ok && conflicting[ci.TVDBId] && !ci.ManualMatch)
 					if ok && ci.Name == item.Name && !stale {
 						if ci.IMDBId != "" || ci.TVDBId != "" {
 							item.IMDBId = ci.IMDBId
@@ -1201,7 +1209,7 @@ func (s *Scheduler) resolveByTitle(ctx context.Context, item *index.Item) error 
 func (s *Scheduler) resolveByTVDB(ctx context.Context, item *index.Item) error {
 	title := cleanTitleForSearch(item.Name, s.userPatterns)
 	year, _ := strconv.Atoi(item.Year)
-	result, err := s.searchTVDBSeries(ctx, title, year)
+	result, err := s.searchTVDBSeries(ctx, title, year, item.IMDBId, item.TMDBId)
 	if err != nil {
 		return err
 	}
