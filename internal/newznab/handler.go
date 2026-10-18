@@ -98,17 +98,11 @@ func (h *Handler) handleMovieSearch(w http.ResponseWriter, r *http.Request) {
 	var results []*index.Item
 
 	switch {
-	case imdbID != "":
-		// Normalise: Radarr may send "tt1234567" or "1234567"
-		if !strings.HasPrefix(imdbID, "tt") {
-			imdbID = "tt" + imdbID
-		}
-		results = filterByType(h.idx.SearchByIMDB(imdbID), index.TypeMovie)
-		slog.Debug("movie search by imdb", "imdb", imdbID, "hits", len(results))
-
-	case tmdbID != "":
-		results = filterByType(h.idx.SearchByTMDB(tmdbID), index.TypeMovie)
-		slog.Debug("movie search by tmdb", "tmdb", tmdbID, "hits", len(results))
+	case imdbID != "" || tmdbID != "":
+		// Radarr sends every ID it has in one request; an entry found by any
+		// of them is the movie (its other ID may be missing or wrong).
+		results = h.byAnyID(index.TypeMovie, "", tmdbID, imdbID)
+		slog.Debug("movie search by id", "imdb", imdbID, "tmdb", tmdbID, "hits", len(results))
 
 	case query != "":
 		// As for series: Radarr's IMDB/TMDB ID search already finds every
@@ -150,6 +144,7 @@ func (h *Handler) handleTVSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	tvdbID := q.Get("tvdbid")
 	tmdbID := q.Get("tmdbid")
+	imdbID := q.Get("imdbid")
 	query := q.Get("q")
 	year := q.Get("year")
 	seasonFilter, _ := strconv.Atoi(q.Get("season"))
@@ -158,13 +153,13 @@ func (h *Handler) handleTVSearch(w http.ResponseWriter, r *http.Request) {
 	var results []*index.Item
 
 	switch {
-	case tvdbID != "":
-		results = filterByType(h.idx.SearchByTVDB(tvdbID), index.TypeSeries)
-		slog.Debug("tv search by tvdb", "tvdb", tvdbID, "hits", len(results))
-
-	case tmdbID != "":
-		results = filterByType(h.idx.SearchByTMDB(tmdbID), index.TypeSeries)
-		slog.Debug("tv search by tmdb", "tmdb", tmdbID, "hits", len(results))
+	case tvdbID != "" || tmdbID != "" || imdbID != "":
+		// Sonarr sends every ID it has in one request (tvdbid, tmdbid,
+		// imdbid). Look each up: an entry whose TVDB link from TMDB is wrong
+		// is still found by its correct TMDB or IMDB ID, and Sonarr accepts
+		// it by the IMDB ID sent with the release.
+		results = h.byAnyID(index.TypeSeries, tvdbID, tmdbID, imdbID)
+		slog.Debug("tv search by id", "tvdb", tvdbID, "tmdb", tmdbID, "imdb", imdbID, "hits", len(results))
 
 	case query != "":
 		// Sonarr searches by TVDB ID first, which finds every series VODarr
@@ -394,6 +389,35 @@ func categoryRangeMatch(cat string, low, high int) bool {
 		}
 	}
 	return false
+}
+
+// byAnyID returns the items of type t found by any of the given IDs, each
+// once, in lookup order (TVDB, TMDB, IMDB). Empty or "0" IDs are skipped.
+func (h *Handler) byAnyID(t index.MediaType, tvdbID, tmdbID, imdbID string) []*index.Item {
+	var out []*index.Item
+	seen := make(map[string]bool)
+	add := func(items []*index.Item) {
+		for _, it := range items {
+			if it.Type == t && !seen[it.Key()] {
+				seen[it.Key()] = true
+				out = append(out, it)
+			}
+		}
+	}
+	if tvdbID != "" && tvdbID != "0" {
+		add(h.idx.SearchByTVDB(tvdbID))
+	}
+	if tmdbID != "" && tmdbID != "0" {
+		add(h.idx.SearchByTMDB(tmdbID))
+	}
+	if imdbID != "" && imdbID != "0" {
+		// arr may send "tt1234567" or "1234567".
+		if !strings.HasPrefix(imdbID, "tt") {
+			imdbID = "tt" + imdbID
+		}
+		add(h.idx.SearchByIMDB(imdbID))
+	}
+	return out
 }
 
 // withoutIDs drops items for which hasID reports a known external ID.

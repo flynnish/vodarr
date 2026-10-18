@@ -104,7 +104,9 @@ type sonarrEpisode struct {
 	SeasonNumber  int `json:"seasonNumber"`
 	EpisodeNumber int `json:"episodeNumber"`
 	Series        struct {
-		TVDBId int `json:"tvdbId"`
+		TVDBId int    `json:"tvdbId"`
+		TMDBId int    `json:"tmdbId"`
+		IMDBId string `json:"imdbId"`
 	} `json:"series"`
 }
 
@@ -144,12 +146,21 @@ func (s *Searcher) runSonarr(ctx context.Context, inst config.ArrInstance, cat C
 	return res, nil
 }
 
-// hasEpisode reports whether VODarr's index holds that episode.
+// hasEpisode reports whether VODarr's index holds that episode. The series
+// is looked up by every ID Sonarr has for it, like VODarr's indexer does, so
+// an entry whose TVDB link from TMDB is wrong is still found.
 func hasEpisode(cat Catalog, ep sonarrEpisode) bool {
-	if ep.Series.TVDBId <= 0 {
-		return false
+	var items []*index.Item
+	if ep.Series.TVDBId > 0 {
+		items = append(items, cat.SearchByTVDB(strconv.Itoa(ep.Series.TVDBId))...)
 	}
-	for _, item := range cat.SearchByTVDB(strconv.Itoa(ep.Series.TVDBId)) {
+	if ep.Series.TMDBId > 0 {
+		items = append(items, cat.SearchByTMDB(strconv.Itoa(ep.Series.TMDBId))...)
+	}
+	if ep.Series.IMDBId != "" {
+		items = append(items, cat.SearchByIMDB(ep.Series.IMDBId)...)
+	}
+	for _, item := range items {
 		if item.Type != index.TypeSeries {
 			continue
 		}

@@ -189,3 +189,49 @@ func TestNameSearchSkipsItemsWithIDs(t *testing.T) {
 		t.Errorf("movie name search should return only the unmatched film:\n%s", movies)
 	}
 }
+
+func TestTVSearchFindsByAnyID(t *testing.T) {
+	// TMDB linked this copy to the wrong TVDB entry. Sonarr sends tvdbid,
+	// tmdbid and imdbid together; the correct TMDB/IMDB ID must still find
+	// it, and the release must carry the "imdb" attribute Sonarr matches on.
+	idx := index.New()
+	idx.Replace([]*index.Item{{
+		Type: index.TypeSeries, XtreamID: 1, Name: "Normal People", CanonicalName: "Normal People",
+		TVDBId: "111111", TMDBId: "89905", IMDBId: "tt9059760", Category: "Series Drama",
+		Episodes: []index.EpisodeItem{{EpisodeID: 1, Season: 1, EpisodeNum: 12}},
+	}})
+	h := NewHandler(idx, "", "http://vodarr:9091", noopURLBuilder{})
+
+	for _, url := range []string{
+		"/api?t=tvsearch&tvdbid=366431&tmdbid=89905&season=1&ep=12",
+		"/api?t=tvsearch&tvdbid=366431&imdbid=tt9059760",
+		"/api?t=tvsearch&imdbid=9059760",
+	} {
+		body := getBody(t, h, url)
+		if !strings.Contains(body, "Normal.People.S01E12") {
+			t.Errorf("%s: release not found:\n%s", url, body)
+			continue
+		}
+		if !strings.Contains(body, `name="imdb" value="9059760"`) {
+			t.Errorf("%s: missing the imdb attribute Sonarr reads:\n%s", url, body)
+		}
+	}
+	// Only the wrong TVDB ID: nothing.
+	if body := getBody(t, h, "/api?t=tvsearch&tvdbid=366431"); strings.Contains(body, "Normal.People") {
+		t.Errorf("found by an ID it does not have:\n%s", body)
+	}
+	if caps := getBody(t, h, "/api?t=caps"); !strings.Contains(caps, "q,tvdbid,tmdbid,imdbid,season,ep") {
+		t.Errorf("caps should advertise imdbid for TV search:\n%s", caps)
+	}
+}
+
+func TestMovieSearchFindsByAnyID(t *testing.T) {
+	// Radarr sends imdbid and tmdbid together; the IMDB ID here is missing
+	// but the TMDB one is right.
+	idx := index.New()
+	idx.Replace([]*index.Item{{Type: index.TypeMovie, XtreamID: 5, Name: "Inception", Year: "2010", TMDBId: "27205"}})
+	h := NewHandler(idx, "", "http://vodarr:9091", noopURLBuilder{})
+	if body := getBody(t, h, "/api?t=movie&imdbid=tt1375666&tmdbid=27205"); !strings.Contains(body, "Inception.2010") {
+		t.Errorf("movie not found by its TMDB ID:\n%s", body)
+	}
+}

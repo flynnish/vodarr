@@ -402,7 +402,7 @@ func buildCaps(serverURL string) *CapsResponse {
 		Limits: CapsLimits{Max: 100, Default: 100},
 		Searching: CapsSearcing{
 			Search:   CapsSearch{Available: "yes", SupportedParams: "q,year"},
-			TVSearch: CapsSearch{Available: "yes", SupportedParams: "q,tvdbid,tmdbid,season,ep"},
+			TVSearch: CapsSearch{Available: "yes", SupportedParams: "q,tvdbid,tmdbid,imdbid,season,ep"},
 			Movie:    CapsSearch{Available: "yes", SupportedParams: "q,imdbid,tmdbid,year"},
 		},
 		Categories: CapsCategories{
@@ -474,6 +474,20 @@ func buildEpisodeRSSItems(serverURL string, items []*index.Item, seasonFilter, e
 		}
 	}
 	return out
+}
+
+// imdbAttrs returns the IMDB ID attributes for an RSS item: "imdb" with the
+// bare number, which is what Sonarr and Radarr read (and Sonarr uses to
+// match a release to a series whose TVDB ID did not match), plus "imdbid"
+// with the tt prefix for other clients. None when id is empty.
+func imdbAttrs(id string) []Attr {
+	if id == "" {
+		return nil
+	}
+	return []Attr{
+		{Name: "imdb", Value: strings.TrimPrefix(id, "tt")},
+		{Name: "imdbid", Value: id},
+	}
 }
 
 // episodeToRSS converts a single episode to an RSS item.
@@ -565,9 +579,7 @@ func episodeToRSS(serverURL string, series *index.Item, ep index.EpisodeItem) It
 	if series.TMDBId != "" {
 		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "tmdbid", Value: series.TMDBId})
 	}
-	if series.IMDBId != "" {
-		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "imdbid", Value: series.IMDBId})
-	}
+	rssItem.Attrs = append(rssItem.Attrs, imdbAttrs(series.IMDBId)...)
 	if ep.Duration > 0 {
 		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "duration", Value: fmt.Sprintf("%.0f", ep.Duration)})
 	}
@@ -626,10 +638,7 @@ func itemToRSS(serverURL string, item *index.Item) Item {
 		},
 	}
 
-	if item.IMDBId != "" {
-		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "imdb", Value: strings.TrimPrefix(item.IMDBId, "tt")})
-		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "imdbid", Value: item.IMDBId})
-	}
+	rssItem.Attrs = append(rssItem.Attrs, imdbAttrs(item.IMDBId)...)
 	if item.TVDBId != "" {
 		rssItem.Attrs = append(rssItem.Attrs, Attr{Name: "tvdbid", Value: item.TVDBId})
 	}

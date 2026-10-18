@@ -205,3 +205,20 @@ func TestUnreachableInstanceDoesNotStopOthers(t *testing.T) {
 		t.Errorf("results %+v, commands %d; want the healthy instance to still search", res, len(f.commands))
 	}
 }
+
+func TestSonarrMissingFoundByTMDBWhenTVDBWrong(t *testing.T) {
+	// VODarr's copy has a wrong TVDB ID but the right TMDB ID.
+	idx := index.New()
+	idx.Replace([]*index.Item{{Type: index.TypeSeries, XtreamID: 1, Name: "Normal People",
+		TVDBId: "111111", TMDBId: "89905",
+		Episodes: []index.EpisodeItem{{EpisodeID: 1, Season: 1, EpisodeNum: 12}}}})
+	missing := []map[string]any{{"id": 501, "seasonNumber": 1, "episodeNumber": 12,
+		"series": map[string]any{"tvdbId": 366431, "tmdbId": 89905, "imdbId": "tt9059760"}}}
+	srv, f := newSonarr(t, missing)
+	inst := config.ArrInstance{Name: "Sonarr", Type: "sonarr", URL: srv.URL, APIKey: "k"}
+
+	NewSearcher().Run(context.Background(), []config.ArrInstance{inst}, idx)
+	if got := f.ids("episodeIds"); len(got) != 1 || got[0] != 501 {
+		t.Errorf("searched %v, want [501]", got)
+	}
+}
