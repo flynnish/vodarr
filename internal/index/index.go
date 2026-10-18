@@ -94,6 +94,11 @@ type Item struct {
 
 	// Normalised title used for fuzzy matching (set by index on insert)
 	normalizedTitle string
+
+	// SharedTitle is set by the index for a series whose title another series
+	// with a different TVDB/TMDB ID also has (Scrubs 2001 and Scrubs 2026).
+	// Only those need the year in their release titles to be told apart.
+	SharedTitle bool `json:"-"`
 }
 
 // EpisodeItem is an episode within a series.
@@ -133,6 +138,45 @@ func xtreamKey(t MediaType, id int) string {
 	return fmt.Sprintf("%s:%d", t, id)
 }
 
+// markSharedTitles sets SharedTitle on every series whose title is also used
+// by a series that is a different show (a different TVDB, else TMDB, ID).
+// Several provider copies of the same show do not count.
+func markSharedTitles(items []*Item) {
+	shows := make(map[string]map[string]bool) // title → show IDs
+	key := func(it *Item) (title, id string) {
+		title = it.CanonicalName
+		if title == "" {
+			title = it.Name
+		}
+		id = it.TVDBId
+		if id == "" && it.TMDBId != "" {
+			id = "tmdb:" + it.TMDBId
+		}
+		return normalizeTitle(title), id
+	}
+	for _, it := range items {
+		if it.Type != TypeSeries {
+			continue
+		}
+		title, id := key(it)
+		if title == "" || id == "" {
+			continue
+		}
+		if shows[title] == nil {
+			shows[title] = make(map[string]bool)
+		}
+		shows[title][id] = true
+	}
+	for _, it := range items {
+		if it.Type != TypeSeries {
+			it.SharedTitle = false
+			continue
+		}
+		title, _ := key(it)
+		it.SharedTitle = len(shows[title]) > 1
+	}
+}
+
 // ProviderType is the item's type on the provider side, which identifies it
 // (VOD and series IDs are separate ID spaces) and decides its stream URL,
 // even after a manual match changed Type.
@@ -155,6 +199,7 @@ func (idx *Index) Replace(items []*Item) {
 	byTMDB := make(map[string][]*Item)
 	byXtream := make(map[string]*Item)
 
+	markSharedTitles(items)
 	for _, item := range items {
 		item.normalizedTitle = normalizeTitle(item.Name)
 

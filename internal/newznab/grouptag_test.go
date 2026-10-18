@@ -90,8 +90,8 @@ func TestReleaseTitlesCarryGroupAndLanguage(t *testing.T) {
 
 	tv := getBody(t, h, "/api?t=tvsearch&tvdbid=465690")
 	for _, want := range []string{
-		"<title>Scrubs.2026.S01E01.SPANISH.WEB-DL-ESSeries.mp4</title>",
-		"<title>Scrubs.2026.S01E01.ENGLISH.WEB-DL-ENSeries.mp4</title>",
+		"<title>Scrubs.S01E01.SPANISH.WEB-DL-ESSeries.mp4</title>",
+		"<title>Scrubs.S01E01.ENGLISH.WEB-DL-ENSeries.mp4</title>",
 		`name="language" value="es"`,
 		`name="language" value="en"`,
 	} {
@@ -122,8 +122,8 @@ func TestDubbedCopyLabelledByItsGroup(t *testing.T) {
 	h := NewHandler(idx, "", "http://vodarr:9091", noopURLBuilder{})
 	body := getBody(t, h, "/api?t=tvsearch&tvdbid=247808")
 	for _, want := range []string{
-		"<title>Suits.2011.S01E01.WEB-DL-SeriesDrama.mkv</title>",
-		"<title>Suits.2011.S01E01.GERMAN.WEB-DL-GERSerien.mkv</title>",
+		"<title>Suits.S01E01.WEB-DL-SeriesDrama.mkv</title>",
+		"<title>Suits.S01E01.GERMAN.WEB-DL-GERSerien.mkv</title>",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %s in\n%s", want, body)

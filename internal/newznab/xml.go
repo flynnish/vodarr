@@ -503,18 +503,21 @@ func episodeToRSS(serverURL string, series *index.Item, ep index.EpisodeItem) It
 	seriesSafe = strings.ReplaceAll(seriesSafe, ":", "")
 	seriesSafe = strings.ReplaceAll(seriesSafe, "/", "")
 
-	// Add the series year, as for movies. Sonarr resolves a release's title
-	// through its scene mappings before comparing TVDB IDs, so a bare shared
-	// title ("Scrubs") is claimed by the show that owns that title (Scrubs
-	// 2001) and the search for "Scrubs (2026)" discards it. "Scrubs.2026"
-	// matches "Scrubs (2026)" by title; for any show whose year is off,
-	// Sonarr's TVDB ID check still finds it.
-	year := series.Year
-	if year == "" && len(series.ReleaseDate) >= 4 {
-		year = series.ReleaseDate[:4]
-	}
-	if year != "" && !strings.Contains(seriesSafe, year) {
-		seriesSafe += "." + year
+	// Add the series year only when another show has the same title. Sonarr
+	// resolves a release's title through its scene mappings before comparing
+	// TVDB IDs, so a bare shared title ("Scrubs") is claimed by the show that
+	// owns it (Scrubs 2001) and a search for "Scrubs (2026)" discards it;
+	// "Scrubs.2026" matches "Scrubs (2026)". For any other show the year only
+	// hurts: Sonarr names it without one, and a provider year that is off
+	// ("Normal.People.2021" for a 2020 show) makes the title match nothing.
+	if series.SharedTitle {
+		year := series.Year
+		if year == "" && len(series.ReleaseDate) >= 4 {
+			year = series.ReleaseDate[:4]
+		}
+		if year != "" && !strings.Contains(seriesSafe, year) {
+			seriesSafe += "." + year
+		}
 	}
 
 	ext := ep.Ext

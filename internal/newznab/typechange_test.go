@@ -117,28 +117,42 @@ func TestDescriptorYearMatchesReleaseTitle(t *testing.T) {
 	}
 }
 
-func TestEpisodeTitleCarriesSeriesYear(t *testing.T) {
-	// Without the year, Sonarr's scene mapping hands "Scrubs" to the 2001
-	// show and the search for Scrubs (2026) discards the release.
+func TestEpisodeTitleCarriesYearOnlyForSharedTitles(t *testing.T) {
+	// Two different shows called Scrubs: without the year, Sonarr's scene
+	// mapping hands "Scrubs" to the 2001 show and the search for Scrubs (2026)
+	// discards the release. Any other show gets no year: Sonarr names it
+	// without one, and a provider year that is off would make it unknown.
+	ep := func(id int) []index.EpisodeItem {
+		return []index.EpisodeItem{{EpisodeID: id, Season: 1, EpisodeNum: 1, Ext: "mkv"}}
+	}
 	idx := index.New()
 	idx.Replace([]*index.Item{
 		{Type: index.TypeSeries, XtreamID: 1, Name: "Scrubs", CanonicalName: "Scrubs", TVDBId: "465690",
-			ReleaseDate: "2026-02-25", Episodes: []index.EpisodeItem{{EpisodeID: 10, Season: 1, EpisodeNum: 1, Ext: "mp4"}}},
-		{Type: index.TypeSeries, XtreamID: 2, Name: "1883", CanonicalName: "1883", TVDBId: "403245",
-			Year: "2021", Episodes: []index.EpisodeItem{{EpisodeID: 20, Season: 1, EpisodeNum: 1}}},
-		{Type: index.TypeSeries, XtreamID: 3, Name: "No Year Show", TVDBId: "999",
-			Episodes: []index.EpisodeItem{{EpisodeID: 30, Season: 1, EpisodeNum: 1}}},
+			ReleaseDate: "2026-02-25", Episodes: ep(10)},
+		{Type: index.TypeSeries, XtreamID: 2, Name: "Scrubs", CanonicalName: "Scrubs", TVDBId: "76156",
+			Year: "2001", Episodes: ep(20)},
+		// Two provider copies of one show are not a shared title.
+		{Type: index.TypeSeries, XtreamID: 3, Name: "Normal People", CanonicalName: "Normal People", TVDBId: "366431",
+			Year: "2021", Category: "Series Drama", Episodes: ep(30)},
+		{Type: index.TypeSeries, XtreamID: 4, Name: "Normal People", CanonicalName: "Normal People", TVDBId: "366431",
+			Year: "2020", Category: "Germany Series", Episodes: ep(40)},
 	})
 	h := NewHandler(idx, "", "http://vodarr:9091", noopURLBuilder{})
 
-	cases := map[string]string{
-		"/api?t=tvsearch&tvdbid=465690": "<title>Scrubs.2026.S01E01.WEB-DL.mp4</title>",
-		"/api?t=tvsearch&tvdbid=403245": "<title>1883.2021.S01E01.WEB-DL.mkv</title>",
-		"/api?t=tvsearch&tvdbid=999":    "<title>No.Year.Show.S01E01.WEB-DL.mkv</title>",
+	cases := map[string][]string{
+		"/api?t=tvsearch&tvdbid=465690": {"<title>Scrubs.2026.S01E01.WEB-DL.mkv</title>"},
+		"/api?t=tvsearch&tvdbid=76156":  {"<title>Scrubs.2001.S01E01.WEB-DL.mkv</title>"},
+		"/api?t=tvsearch&tvdbid=366431": {
+			"<title>Normal.People.S01E01.WEB-DL-SeriesDrama.mkv</title>",
+			"<title>Normal.People.S01E01.GERMAN.WEB-DL-GermanySeries.mkv</title>",
+		},
 	}
-	for url, want := range cases {
-		if body := getBody(t, h, url); !strings.Contains(body, want) {
-			t.Errorf("%s: want %s in\n%s", url, want, body)
+	for url, wants := range cases {
+		body := getBody(t, h, url)
+		for _, want := range wants {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: want %s in\n%s", url, want, body)
+			}
 		}
 	}
 }
