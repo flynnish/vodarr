@@ -156,3 +156,36 @@ func TestEpisodeTitleCarriesYearOnlyForSharedTitles(t *testing.T) {
 		}
 	}
 }
+
+func TestNameSearchSkipsItemsWithIDs(t *testing.T) {
+	// Two shows called Normal People: the one Sonarr has, and a different
+	// one the provider carries. A name search must not offer the matched
+	// one (Sonarr's ID search already finds it, and rejects the other as
+	// unknown series); an unmatched entry is still found by name.
+	ep := []index.EpisodeItem{{EpisodeID: 1, Season: 1, EpisodeNum: 12}}
+	idx := index.New()
+	idx.Replace([]*index.Item{
+		{Type: index.TypeSeries, XtreamID: 1, Name: "Normal People", TVDBId: "999001", Episodes: ep},
+		{Type: index.TypeSeries, XtreamID: 2, Name: "Normal People Unmatched Copy", Episodes: ep},
+		{Type: index.TypeMovie, XtreamID: 3, Name: "Scary Movie", Year: "2000", IMDBId: "tt0175142"},
+		{Type: index.TypeMovie, XtreamID: 4, Name: "Scary Movie", Year: "2000"},
+	})
+	h := NewHandler(idx, "", "http://vodarr:9091", noopURLBuilder{})
+
+	tv := getBody(t, h, "/api?t=tvsearch&q=Normal%20People&season=1&ep=12")
+	if strings.Contains(tv, "id=1&amp;") {
+		t.Errorf("name search offered the series with a TVDB ID:\n%s", tv)
+	}
+	if !strings.Contains(tv, "id=2&amp;") {
+		t.Errorf("name search lost the unmatched series:\n%s", tv)
+	}
+	// The ID search still finds the matched one.
+	if byID := getBody(t, h, "/api?t=tvsearch&tvdbid=999001"); !strings.Contains(byID, "id=1&amp;") {
+		t.Errorf("ID search lost the matched series:\n%s", byID)
+	}
+
+	movies := getBody(t, h, "/api?t=movie&q=Scary%20Movie")
+	if strings.Contains(movies, "id=3&amp;") || !strings.Contains(movies, "id=4&amp;") {
+		t.Errorf("movie name search should return only the unmatched film:\n%s", movies)
+	}
+}

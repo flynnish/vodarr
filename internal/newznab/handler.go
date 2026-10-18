@@ -111,7 +111,12 @@ func (h *Handler) handleMovieSearch(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("movie search by tmdb", "tmdb", tmdbID, "hits", len(results))
 
 	case query != "":
-		results = h.idx.SearchByTitle(query, year, index.TypeMovie, 50)
+		// As for series: Radarr's IMDB/TMDB ID search already finds every
+		// movie VODarr has an ID for; a name search only adds same-named
+		// films Radarr would reject.
+		results = withoutIDs(h.idx.SearchByTitle(query, year, index.TypeMovie, 50), func(it *index.Item) bool {
+			return it.IMDBId != "" || it.TMDBId != ""
+		})
 		slog.Debug("movie text search", "q", query, "hits", len(results))
 
 	default:
@@ -162,7 +167,13 @@ func (h *Handler) handleTVSearch(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("tv search by tmdb", "tmdb", tmdbID, "hits", len(results))
 
 	case query != "":
-		results = h.idx.SearchByTitle(query, year, index.TypeSeries, 50)
+		// Sonarr searches by TVDB ID first, which finds every series VODarr
+		// has an ID for. Its name search is only useful for series VODarr
+		// could not match; returning matched ones too just offers other
+		// shows of the same name, which Sonarr rejects as "unknown series".
+		results = withoutIDs(h.idx.SearchByTitle(query, year, index.TypeSeries, 50), func(it *index.Item) bool {
+			return it.TVDBId != ""
+		})
 		slog.Debug("tv text search", "q", query, "hits", len(results))
 
 	default:
@@ -383,6 +394,17 @@ func categoryRangeMatch(cat string, low, high int) bool {
 		}
 	}
 	return false
+}
+
+// withoutIDs drops items for which hasID reports a known external ID.
+func withoutIDs(items []*index.Item, hasID func(*index.Item) bool) []*index.Item {
+	out := items[:0:0]
+	for _, it := range items {
+		if !hasID(it) {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 // filterByType returns only items of the given media type.
