@@ -20,6 +20,7 @@ import (
 	"github.com/vodarr/vodarr/internal/newznab"
 	"github.com/vodarr/vodarr/internal/probe"
 	"github.com/vodarr/vodarr/internal/qbit"
+	"github.com/vodarr/vodarr/internal/streamproxy"
 	"github.com/vodarr/vodarr/internal/strm"
 	vodarrsync "github.com/vodarr/vodarr/internal/sync"
 	"github.com/vodarr/vodarr/internal/tmdb"
@@ -125,6 +126,22 @@ func main() {
 	// 2E: Pass web credentials from config
 	updateChecker := update.New()
 	webHandler := web.NewHandler(idx, scheduler, strmWriter, web.StaticFS(), logBuf, cfg, *configPath, cfg.Server.WebUsername, cfg.Server.WebPassword, version, updateChecker)
+
+	// Stream proxy: keeps provider credentials out of .strm files. /play/ is
+	// always served, so already-proxied .strm files keep playing even with
+	// the proxy turned off; new .strm files use it only when it is on.
+	if key, err := streamproxy.LoadOrCreateKey(filepath.Join(filepath.Dir(*configPath), "stream.key")); err != nil {
+		slog.Error("stream proxy unavailable", "error", err)
+	} else {
+		proxy := streamproxy.New(key, cfg.Output.StreamProxyURL, xc.BuildStreamURL)
+		var strmURL func(kind string, id int, ext string) string
+		if cfg.Output.StreamProxy {
+			strmURL = proxy.URL
+			qbitHandler.SetStrmURL(strmURL)
+			slog.Info("stream proxy on: .strm files point at VODarr, not the provider", "base", cfg.Output.StreamProxyURL)
+		}
+		webHandler.SetStreamProxy(proxy, strmURL)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

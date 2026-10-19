@@ -69,13 +69,23 @@ Do **not** list `strm` under **Settings → Media Management → Import Extra Fi
 
 ## ⚠️ Security — credentials in `.strm` files
 
-Every `.strm` file contains your Xtream username and password in the stream URL:
+By default, every `.strm` file contains your Xtream username and password in the stream URL:
 
 ```
 http://provider.example.com/movie/username/password/12345.mkv
 ```
 
-This is a limitation of the Xtream Codes protocol — credentials are embedded in stream URLs by design and cannot be removed.
+This is a limitation of the Xtream Codes protocol: credentials are embedded in stream URLs by design.
+
+**Fix: turn on Settings → Output → Hide Provider Login** (`output.stream_proxy: true`, with `output.stream_proxy_url` set to how your media server reaches VODarr's web port, e.g. `http://vodarr:9090`). `.strm` files then hold a VODarr address instead:
+
+```
+http://vodarr:9090/play/3f9a…c21e/movie/12345.mkv
+```
+
+VODarr builds the provider URL itself and relays the stream (seeking included, provider redirects followed inside VODarr), so the login never appears in your library or media server logs. Each address carries a signature (key in `stream.key` next to `config.yml`; keep it), so other streams cannot be guessed. After switching it on, save, restart, and click **Rewrite .strm files**, which also updates the copies in your Sonarr/Radarr library folders. Playback then depends on VODarr running.
+
+Without the proxy, the following applies.
 
 **What this means in practice:**
 

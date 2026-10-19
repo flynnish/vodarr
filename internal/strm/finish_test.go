@@ -116,3 +116,39 @@ func TestFromOutput(t *testing.T) {
 		}
 	}
 }
+
+func TestRefreshURLsInRewritesToProxyEverywhere(t *testing.T) {
+	output := t.TempDir()
+	library := t.TempDir()
+	provider := "http://provider.example.com/series/user/secret/9001.mkv\n"
+	writeFile(t, filepath.Join(output, "tv", "Show", "Season 01", "Show.S01E01.WEB-DL.strm"), []byte(provider))
+	writeFile(t, filepath.Join(library, "Show", "Season 01", "Show - S01E01.strm"), []byte(provider))
+	other := filepath.Join(library, "Other", "radio.strm")
+	writeFile(t, other, []byte("http://radio.example.com/live\n"))
+
+	toProxy := func(kind, id, ext string) (string, error) {
+		return "http://vodarr:9090/play/0123456789abcdef0123456789abcdef/" + kind + "/" + id + "." + ext, nil
+	}
+	n, err := RefreshURLsIn([]string{output, library, library}, toProxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("rewritten %d files, want 2 (output + library, each folder once)", n)
+	}
+	got, _ := os.ReadFile(filepath.Join(library, "Show", "Season 01", "Show - S01E01.strm"))
+	if strings.Contains(string(got), "secret") || !strings.Contains(string(got), "/play/") {
+		t.Errorf("library .strm still holds the login: %q", got)
+	}
+	if b, _ := os.ReadFile(other); string(b) != "http://radio.example.com/live\n" {
+		t.Errorf("a non-VODarr .strm was changed: %q", b)
+	}
+
+	// And back: proxy URLs are recognised and turned into provider URLs.
+	back := func(kind, id, ext string) (string, error) {
+		return "http://provider.example.com/" + kind + "/user/newpass/" + id + "." + ext, nil
+	}
+	if n, _ := RefreshURLsIn([]string{library}, back); n != 1 {
+		t.Errorf("rewrote %d proxied files back, want 1", n)
+	}
+}

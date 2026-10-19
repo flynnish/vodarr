@@ -207,75 +207,94 @@ func (w *Writer) RemoveSeries(name string) error {
 // Capture groups: (1) scheme+host, (2) stream type, (3) stream ID, (4) extension.
 var xtreamURLRe = regexp.MustCompile(`^https?://[^/]+/(movie|series)/[^/]+/[^/]+/(\d+)\.([^/\n]+)$`)
 
-// RefreshURLs walks the output directory, finds every .strm file, and rewrites
-// its URL using buildURL(streamType, streamID, ext). Files whose URL does not
-// match the Xtream pattern are skipped. Returns the number of files rewritten
-// and the first error encountered (processing continues past errors).
-func (w *Writer) RefreshURLs(buildURL func(streamType, streamID, ext string) (string, error)) (int, error) {
-	absOutput, err := filepath.Abs(w.outputPath)
-	if err != nil {
-		return 0, fmt.Errorf("abs output path: %w", err)
-	}
+// proxyURLRe matches VODarr stream proxy URLs, which .strm files hold when
+// the proxy is on: {scheme}://{host}/play/{sig}/{movie|series}/{id}.{ext}
+var proxyURLRe = regexp.MustCompile(`^https?://[^/]+/play/[0-9a-f]+/(movie|series)/(\d+)\.([^/\n]+)$`)
 
+// parseStreamURL returns the stream an Xtream or stream-proxy URL names.
+func parseStreamURL(raw string) (kind, id, ext string, ok bool) {
+	for _, re := range []*regexp.Regexp{xtreamURLRe, proxyURLRe} {
+		if m := re.FindStringSubmatch(raw); m != nil {
+			return m[1], m[2], m[3], true
+		}
+	}
+	return "", "", "", false
+}
+
+// RefreshURLs walks the output directory, finds every .strm file, and rewrites
+// its URL with buildURL (e.g. with new credentials, or to or from the stream
+// proxy). Files holding neither an Xtream nor a stream-proxy URL are left alone.
+func (w *Writer) RefreshURLs(buildURL func(streamType, streamID, ext string) (string, error)) (int, error) {
+	return RefreshURLsIn([]string{w.outputPath}, buildURL)
+}
+
+// RefreshURLsIn is RefreshURLs over several folders, such as VODarr's output
+// folder plus the Sonarr/Radarr library folders the import webhook copies
+// .strm files into. Each folder is walked once; files outside it (through a
+// symlinked folder) are skipped.
+func RefreshURLsIn(roots []string, buildURL func(streamType, streamID, ext string) (string, error)) (int, error) {
 	count := 0
 	var firstErr error
-
-	_ = filepath.WalkDir(absOutput, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return nil // skip unreadable entries
+	keep := func(err error) {
+		if firstErr == nil {
+			firstErr = err
 		}
-		if d.IsDir() || !strings.HasSuffix(path, ".strm") {
-			return nil
+	}
+	seen := make(map[string]bool)
+	for _, root := range roots {
+		absRoot, err := filepath.Abs(root)
+		if err != nil || root == "" || seen[absRoot] {
+			continue
 		}
+		seen[absRoot] = true
 
-		// Path traversal guard
-		absPath, absErr := filepath.Abs(path)
-		if absErr != nil || !strings.HasPrefix(absPath+string(filepath.Separator), absOutput+string(filepath.Separator)) {
-			slog.Warn("strm refresh: skipping file outside output dir", "path", path)
-			return nil
-		}
-
-		data, readErr := os.ReadFile(absPath)
-		if readErr != nil {
-			if firstErr == nil {
-				firstErr = readErr
+		_ = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil // skip unreadable entries
 			}
-			slog.Warn("strm refresh: read failed", "path", absPath, "error", readErr)
-			return nil
-		}
-
-		rawURL := strings.TrimSpace(string(data))
-		m := xtreamURLRe.FindStringSubmatch(rawURL)
-		if m == nil {
-			// Not an Xtream URL — skip silently
-			return nil
-		}
-
-		streamType, streamIDStr, ext := m[1], m[2], m[3]
-
-		newURL, buildErr := buildURL(streamType, streamIDStr, ext)
-		if buildErr != nil {
-			if firstErr == nil {
-				firstErr = buildErr
+			if d.IsDir() || !strings.HasSuffix(path, ".strm") {
+				return nil
 			}
-			slog.Warn("strm refresh: buildURL failed", "path", absPath, "error", buildErr)
-			return nil
-		}
-		if newURL == "" || newURL == rawURL {
-			return nil // unknown type or no change needed
-		}
 
-		if writeErr := os.WriteFile(absPath, []byte(newURL+"\n"), 0644); writeErr != nil {
-			if firstErr == nil {
-				firstErr = writeErr
+			// Path traversal guard
+			absPath, absErr := filepath.Abs(path)
+			if absErr != nil || !strings.HasPrefix(absPath+string(filepath.Separator), absRoot+string(filepath.Separator)) {
+				slog.Warn("strm refresh: skipping file outside folder", "path", path)
+				return nil
 			}
-			slog.Warn("strm refresh: write failed", "path", absPath, "error", writeErr)
-			return nil
-		}
-		count++
-		return nil
-	})
 
+			data, readErr := os.ReadFile(absPath)
+			if readErr != nil {
+				keep(readErr)
+				slog.Warn("strm refresh: read failed", "path", absPath, "error", readErr)
+				return nil
+			}
+
+			rawURL := strings.TrimSpace(string(data))
+			streamType, streamIDStr, ext, ok := parseStreamURL(rawURL)
+			if !ok {
+				return nil // not a VODarr stream: leave it alone
+			}
+
+			newURL, buildErr := buildURL(streamType, streamIDStr, ext)
+			if buildErr != nil {
+				keep(buildErr)
+				slog.Warn("strm refresh: buildURL failed", "path", absPath, "error", buildErr)
+				return nil
+			}
+			if newURL == "" || newURL == rawURL {
+				return nil // unknown type or no change needed
+			}
+
+			if writeErr := os.WriteFile(absPath, []byte(newURL+"\n"), 0644); writeErr != nil {
+				keep(writeErr)
+				slog.Warn("strm refresh: write failed", "path", absPath, "error", writeErr)
+				return nil
+			}
+			count++
+			return nil
+		})
+	}
 	return count, firstErr
 }
 

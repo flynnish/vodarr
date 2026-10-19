@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react'
 const DEFAULT = {
   xtream: { url: '', username: '', password: '' },
   tmdb: { api_key: '', tvdb_api_key: '' },
-  output: { path: '/data/strm', movies_dir: 'movies', series_dir: 'tv', mode: 'strm', max_concurrent_downloads: 1, download_delay: '30s', bandwidth_limit: '', default_language: 'original' },
+  output: { path: '/data/strm', movies_dir: 'movies', series_dir: 'tv', mode: 'strm', max_concurrent_downloads: 1, download_delay: '30s', bandwidth_limit: '', default_language: 'original', stream_proxy: false, stream_proxy_url: '' },
   sync: { interval: '6h', on_startup: true, parallelism: 10, title_cleanup_patterns: [] },
   server: { newznab_port: 9091, qbit_port: 9092, web_port: 9090 },
   logging: { level: 'info' },
@@ -107,6 +107,47 @@ function TestButton({ onClick, loading, success, error }) {
       {error && (
         <span className="font-mono text-[12px] text-red-400 animate-fade-up">{error}</span>
       )}
+    </div>
+  )
+}
+
+// StrmRewrite rewrites every VODarr .strm file (VODarr's folder and the
+// Sonarr/Radarr libraries) to the current URL form: through the stream proxy
+// when it is on, else the provider URL with the current login.
+function StrmRewrite() {
+  const [state, setState] = useState({ loading: false, done: null, error: null })
+
+  const run = async () => {
+    setState({ loading: true, done: null, error: null })
+    try {
+      const res = await fetch('/api/strm/refresh', { method: 'POST' })
+      const text = await res.text()
+      let data = {}
+      try { data = JSON.parse(text) } catch { /* plain-text error */ }
+      if (!res.ok) throw new Error(data.error || text || `HTTP ${res.status}`)
+      setState({ loading: false, done: data.rewritten ?? 0, error: data.error || null })
+    } catch (e) {
+      setState({ loading: false, done: null, error: e.message })
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <button
+        type="button"
+        onClick={run}
+        disabled={state.loading}
+        className="px-4 py-1.5 bg-void-600 border border-void-500 text-steel-400 rounded font-mono text-[12px] hover:bg-void-500 hover:text-steel-300 transition-all disabled:opacity-40"
+      >
+        {state.loading ? 'Rewriting…' : 'Rewrite .strm files'}
+      </button>
+      {state.done !== null && (
+        <span className="font-mono text-[11px] text-lime-400">{state.done} file{state.done === 1 ? '' : 's'} rewritten</span>
+      )}
+      {state.error && <span className="font-mono text-[11px] text-red-400">{state.error}</span>}
+      <span className="font-mono text-[10px] text-steel-500">
+        Updates every VODarr .strm file, including the copies in your Sonarr/Radarr library, after changing the setting above or your provider login.
+      </span>
     </div>
   )
 }
@@ -870,6 +911,30 @@ export default function Settings() {
                 <option value="tr">Turkish</option>
               </select>
             </Field>
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="font-mono text-[11px] text-steel-400 uppercase tracking-widest">Hide Provider Login</p>
+                <p className="mt-1 font-mono text-[10px] text-steel-500">
+                  .strm files point at VODarr instead of the provider, and VODarr relays the stream, so your provider
+                  username and password are not stored in your library or shown in media server logs.
+                </p>
+              </div>
+              <Toggle value={!!cfg.output.stream_proxy} onChange={v => set('output.stream_proxy', v)} />
+            </div>
+            {cfg.output.stream_proxy && (
+              <Field
+                label="VODarr Address for Jellyfin"
+                hint="How your media server reaches VODarr's web port, e.g. http://vodarr:9090 on a shared Docker network. Save, restart, then rewrite your .strm files below."
+              >
+                <TextInput
+                  value={cfg.output.stream_proxy_url || ''}
+                  onChange={v => set('output.stream_proxy_url', v)}
+                  placeholder="http://vodarr:9090"
+                  monospace
+                />
+              </Field>
+            )}
+            <StrmRewrite />
             {cfg.output.mode === 'download' && (
               <>
                 <div className="grid grid-cols-3 gap-4">

@@ -64,6 +64,12 @@ type OutputConfig struct {
 	// assumes the title's original language; or an ISO 639-1 code ("en",
 	// "de", ...) to label them all with that one language.
 	DefaultLanguage string `yaml:"default_language"`
+	// StreamProxy writes VODarr URLs into .strm files instead of provider
+	// URLs (which embed the account's username and password); VODarr relays
+	// the stream. StreamProxyURL is how the media server reaches VODarr's
+	// web port, e.g. "http://vodarr:9090".
+	StreamProxy    bool   `yaml:"stream_proxy"`
+	StreamProxyURL string `yaml:"stream_proxy_url,omitempty"`
 
 	// Parsed values (not from YAML directly)
 	ParsedDownloadDelay  time.Duration `yaml:"-"`
@@ -261,6 +267,12 @@ func (c *Config) validate() error {
 	switch c.Output.DefaultLanguage {
 	case "", "none": // older spellings
 		c.Output.DefaultLanguage = "original"
+	}
+	if c.Output.StreamProxy {
+		u := c.Output.StreamProxyURL
+		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+			return fmt.Errorf("output.stream_proxy_url must be the http(s) address your media server reaches VODarr's web port at (e.g. http://vodarr:9090) when output.stream_proxy is on")
+		}
 	}
 	if dl := c.Output.DefaultLanguage; dl != "original" && !isLanguageCode(dl) {
 		return fmt.Errorf("output.default_language must be \"original\" or a two-letter language code (e.g. en, de), got %q", dl)

@@ -60,6 +60,20 @@ type Handler struct {
 	cfg        *config.Config
 	cfgPath    string
 	refreshing atomic.Bool // guards against concurrent /api/strm/refresh calls
+
+	// strmURL, when set, is the stream proxy's URL for a stream; the .strm
+	// rewrite then writes it instead of the provider URL.
+	strmURL func(kind string, id int, ext string) string
+}
+
+// SetStreamProxy serves the stream proxy at /play/ (public: media servers
+// cannot log in, and every URL carries its own signature) and, when strmURL
+// is non-nil, makes the .strm rewrite write proxy URLs. The route is served
+// even with the proxy off, so proxied .strm files keep playing until they
+// are rewritten. Call before serving.
+func (h *Handler) SetStreamProxy(proxy http.Handler, strmURL func(kind string, id int, ext string) string) {
+	h.mux.Handle("/play/", proxy)
+	h.strmURL = strmURL
 }
 
 func NewHandler(idx *index.Index, scheduler *vodarrsync.Scheduler, writer *strm.Writer, staticFS fs.FS, logBuf logLines, cfg *config.Config, cfgPath string, username, password, version string, checker updateChecker) *Handler {
@@ -277,6 +291,8 @@ type outputConfigResp struct {
 	DownloadDelay          string `json:"download_delay"`
 	BandwidthLimit         string `json:"bandwidth_limit"`
 	DefaultLanguage        string `json:"default_language"`
+	StreamProxy            bool   `json:"stream_proxy"`
+	StreamProxyURL         string `json:"stream_proxy_url"`
 }
 
 type syncConfigResp struct {
@@ -320,6 +336,8 @@ func (h *Handler) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			DownloadDelay:          cfg.Output.DownloadDelay,
 			BandwidthLimit:         cfg.Output.BandwidthLimit,
 			DefaultLanguage:        cfg.Output.DefaultLanguage,
+			StreamProxy:            cfg.Output.StreamProxy,
+			StreamProxyURL:         cfg.Output.StreamProxyURL,
 		},
 		Sync: syncConfigResp{
 			Interval:             cfg.Sync.Interval,
@@ -374,6 +392,8 @@ type putConfigRequest struct {
 		DownloadDelay          string `json:"download_delay"`
 		BandwidthLimit         string `json:"bandwidth_limit"`
 		DefaultLanguage        string `json:"default_language"`
+		StreamProxy            *bool  `json:"stream_proxy"`
+		StreamProxyURL         string `json:"stream_proxy_url"`
 	} `json:"output"`
 	Sync struct {
 		Interval             string   `json:"interval"`
@@ -434,6 +454,10 @@ func (h *Handler) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	newCfg.Output.BandwidthLimit = req.Output.BandwidthLimit
 	if req.Output.DefaultLanguage != "" { // older UIs do not send it
 		newCfg.Output.DefaultLanguage = req.Output.DefaultLanguage
+	}
+	if req.Output.StreamProxy != nil { // older UIs do not send it
+		newCfg.Output.StreamProxy = *req.Output.StreamProxy
+		newCfg.Output.StreamProxyURL = strings.TrimRight(strings.TrimSpace(req.Output.StreamProxyURL), "/")
 	}
 	newCfg.Sync.Interval = req.Sync.Interval
 	newCfg.Sync.OnStartup = req.Sync.OnStartup
@@ -1661,6 +1685,8 @@ func (h *Handler) handleStrmRefresh(w http.ResponseWriter, r *http.Request) {
 
 	h.cfgMu.RLock()
 	xc := xtream.NewClient(h.cfg.Xtream.URL, h.cfg.Xtream.Username, h.cfg.Xtream.Password)
+	outputPath := h.cfg.Output.Path
+	instances := h.cfg.Arr.Instances
 	h.cfgMu.RUnlock()
 
 	buildURL := func(streamType, streamIDStr, ext string) (string, error) {
@@ -1668,14 +1694,32 @@ func (h *Handler) handleStrmRefresh(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return "", fmt.Errorf("invalid stream id %q: %w", streamIDStr, err)
 		}
-		url := xc.BuildStreamURL(streamType, id, ext)
-		if url == "" {
+		if streamType != "movie" && streamType != "series" {
 			return "", fmt.Errorf("unknown stream type %q", streamType)
 		}
-		return url, nil
+		if h.strmURL != nil {
+			return h.strmURL(streamType, id, ext), nil
+		}
+		return xc.BuildStreamURL(streamType, id, ext), nil
 	}
 
-	n, err := h.writer.RefreshURLs(buildURL)
+	// VODarr's output folder, plus the Sonarr/Radarr library folders the
+	// import webhook copies .strm files into: with only the former, the
+	// library would keep the old URLs (and, before the proxy, credentials).
+	roots := []string{outputPath}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	searcher := arr.NewSearcher()
+	for _, inst := range instances {
+		folders, err := searcher.RootFolders(ctx, inst)
+		if err != nil {
+			slog.Warn("strm refresh: could not list library folders", "instance", inst.Name, "error", err)
+			continue
+		}
+		roots = append(roots, folders...)
+	}
+	cancel()
+
+	n, err := strm.RefreshURLsIn(roots, buildURL)
 	if err != nil {
 		slog.Warn("strm refresh completed with errors", "rewritten", n, "error", err)
 	} else {
