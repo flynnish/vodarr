@@ -47,6 +47,8 @@ type itemDescriptor struct {
 	// still the provider's original kind (see movieStreamURL/episodeStreamURL).
 	SourceType      string `json:"source_type,omitempty"`
 	StreamEpisodeID int    `json:"stream_episode_id,omitempty"`
+	// Provider is the extra provider the stream comes from; "" = primary.
+	Provider string `json:"provider,omitempty"`
 	Episodes        []struct {
 		EpisodeID  int    `json:"EpisodeID"`
 		Season     int    `json:"Season"`
@@ -86,13 +88,34 @@ type Handler struct {
 	// strmURL, when set, gives the URL written into .strm files (the
 	// stream proxy's, which keeps provider credentials out of them). The
 	// real provider URL is still used for probing and downloads.
-	strmURL func(kind string, id int, ext string) string
+	strmURL func(provider, kind string, id int, ext string) string
+
+	// providers are the extra providers' clients, by provider ID.
+	providers map[string]*xtream.Client
 }
 
 // SetStrmURL makes .strm files hold the URLs fn returns instead of provider
 // URLs. Call before serving.
-func (h *Handler) SetStrmURL(fn func(kind string, id int, ext string) string) {
+func (h *Handler) SetStrmURL(fn func(provider, kind string, id int, ext string) string) {
 	h.strmURL = fn
+}
+
+// SetProviders sets the extra providers' clients, by provider ID. Call
+// before serving.
+func (h *Handler) SetProviders(clients map[string]*xtream.Client) {
+	h.providers = clients
+}
+
+// clientFor is the Xtream client for a descriptor's provider.
+func (h *Handler) clientFor(provider string) *xtream.Client {
+	if provider == "" {
+		return h.xtream
+	}
+	if c := h.providers[provider]; c != nil {
+		return c
+	}
+	slog.Warn("grab names an unknown provider, using the primary", "provider", provider)
+	return h.xtream
 }
 
 func NewHandler(store *Store, writer *strm.Writer, xc *xtream.Client, pr Prober, savePath, username, password, newznabURL, outputMode string, dlManager *download.Manager) *Handler {
@@ -418,7 +441,7 @@ func (h *Handler) processURL(rawURL, savePath, category string) error {
 	}
 
 	hf := fnv.New64a()
-	fmt.Fprintf(hf, "%s-%d", desc.Type, desc.XtreamID)
+	fmt.Fprintf(hf, "%s-%s-%d", desc.Provider, desc.Type, desc.XtreamID)
 	hash := fmt.Sprintf("%016x", hf.Sum64())
 
 	return h.processDescriptor(desc, hash, savePath, category)
@@ -488,22 +511,22 @@ func episodeStream(desc itemDescriptor, episodeID int) (kind string, id int) {
 // movieStreamURL is the provider URL for a movie descriptor.
 func (h *Handler) movieStreamURL(desc itemDescriptor, ext string) string {
 	kind, id := movieStream(desc)
-	return h.xtream.BuildStreamURL(kind, id, ext)
+	return h.clientFor(desc.Provider).BuildStreamURL(kind, id, ext)
 }
 
 // episodeStreamURL is the provider URL for one episode of a series descriptor.
 func (h *Handler) episodeStreamURL(desc itemDescriptor, episodeID int, ext string) string {
 	kind, id := episodeStream(desc, episodeID)
-	return h.xtream.BuildStreamURL(kind, id, ext)
+	return h.clientFor(desc.Provider).BuildStreamURL(kind, id, ext)
 }
 
 // strmContent is what a .strm file holds for a stream: the stream proxy's
 // URL when enabled, else the provider URL.
-func (h *Handler) strmContent(kind string, id int, ext string) string {
+func (h *Handler) strmContent(provider, kind string, id int, ext string) string {
 	if h.strmURL != nil {
-		return h.strmURL(kind, id, ext)
+		return h.strmURL(provider, kind, id, ext)
 	}
-	return h.xtream.BuildStreamURL(kind, id, ext)
+	return h.clientFor(provider).BuildStreamURL(kind, id, ext)
 }
 
 // processStrm writes .strm pointer files and .mkv stubs (original behavior).
@@ -536,7 +559,7 @@ func (h *Handler) processStrm(desc itemDescriptor, hash string) {
 			}
 		}
 		kind, id := movieStream(desc)
-		result, err := h.writer.WriteMovie(desc.Name, desc.Year, h.strmContent(kind, id, ext), info)
+		result, err := h.writer.WriteMovie(desc.Name, desc.Year, h.strmContent(desc.Provider, kind, id, ext), info)
 		if err != nil {
 			writeErr = err
 		} else {
@@ -565,7 +588,7 @@ func (h *Handler) processStrm(desc itemDescriptor, hash string) {
 				epInfo = &cp
 			}
 			kind, id := episodeStream(desc, ep.EpisodeID)
-			result, err := h.writer.WriteEpisode(desc.Name, ep.Season, ep.EpisodeNum, ep.Title, h.strmContent(kind, id, epExt), epInfo)
+			result, err := h.writer.WriteEpisode(desc.Name, ep.Season, ep.EpisodeNum, ep.Title, h.strmContent(desc.Provider, kind, id, epExt), epInfo)
 			if err != nil {
 				slog.Warn("strm write episode failed", "error", err)
 				continue

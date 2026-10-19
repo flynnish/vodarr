@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"runtime"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -142,7 +142,8 @@ type Progress struct {
 // Scheduler manages periodic syncing of the Xtream catalog into the index.
 type Scheduler struct {
 	cfg          *config.Config
-	xtream       *xtream.Client
+	xtream       *xtream.Client // primary provider
+	extra        []source       // extra providers (SetProviders)
 	tmdb         *tmdb.Client
 	tvdb         *tvdb.Client // nil when tvdb_api_key is not configured
 	idx          *index.Index
@@ -151,11 +152,11 @@ type Scheduler struct {
 	cachePath    string
 	syncGen      int // monotonically increasing sync generation counter
 
-	mu      gosync.RWMutex // 3A: protects status field
-	syncMu  gosync.Mutex   // 3B: serialises concurrent Sync calls
-	status  Status
-	syncHistory []SyncRun  // rolling log, capped at syncHistoryCap, protected by mu
-	cancel  context.CancelFunc
+	mu          gosync.RWMutex // 3A: protects status field
+	syncMu      gosync.Mutex   // 3B: serialises concurrent Sync calls
+	status      Status
+	syncHistory []SyncRun // rolling log, capped at syncHistoryCap, protected by mu
+	cancel      context.CancelFunc
 
 	// excluded holds the provider groups left out of the index
 	// ("vod:<id>" / "series:<id>"); protected by mu.
@@ -577,30 +578,72 @@ func (s *Scheduler) loop(ctx context.Context, firstDelay time.Duration) {
 	}
 }
 
-// fetchAll retrieves the full VOD + series catalog from Xtream.
+// fetchAll retrieves the full VOD + series catalog from every provider.
 //
-// Items in an excluded provider group are left out; their "type:id" keys
-// are returned in excluded so the grace period does not keep them alive.
+// Items in an excluded provider group are left out; their keys are returned
+// in excluded so the grace period does not keep them alive. When one of
+// several providers fails, the others are still synced and its titles are
+// kept by the grace period, as for a brief outage.
 func (s *Scheduler) fetchAll(ctx context.Context) (items []*index.Item, excluded map[string]bool, err error) {
 	excluded = make(map[string]bool)
 	excludedCats := s.excludedCategories()
+	sources := s.sources()
 
+	var firstErr error
+	synced := 0
+	for _, src := range sources {
+		got, err := s.fetchProvider(ctx, src, excludedCats, excluded)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			if len(sources) == 1 {
+				return nil, nil, err
+			}
+			slog.Warn("provider sync failed; its titles are kept for the grace period", "provider", src.name, "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		synced++
+		items = append(items, got...)
+	}
+	if synced == 0 {
+		return nil, nil, firstErr
+	}
+	if len(excluded) > 0 {
+		slog.Info("excluded provider groups", "items_skipped", len(excluded))
+	}
+	return items, excluded, nil
+}
+
+// fetchProvider retrieves one provider's VOD + series catalog. Its items
+// carry the provider; keys of excluded items are added to excluded.
+func (s *Scheduler) fetchProvider(ctx context.Context, src source, excludedCats, excluded map[string]bool) (items []*index.Item, err error) {
+	xc := src.client
 	// Group names are only for display; a failure here is not fatal.
-	vodCats := s.categoryNames(ctx, s.xtream.GetVODCategories)
-	seriesCats := s.categoryNames(ctx, s.xtream.GetSeriesCategories)
+	vodCats := s.categoryNames(ctx, xc.GetVODCategories)
+	seriesCats := s.categoryNames(ctx, xc.GetSeriesCategories)
+	label := func(stage string) string {
+		if src.id == "" {
+			return stage
+		}
+		return stage + " (" + src.name + ")"
+	}
 
 	// --- VOD ---
-	s.setProgress("Fetching VOD catalog", 0, 0)
-	allStreams, err := s.xtream.GetVODStreams(ctx, "")
+	s.setProgress(label("Fetching VOD catalog"), 0, 0)
+	allStreams, err := xc.GetVODStreams(ctx, "")
 	if err != nil {
-		return nil, nil, fmt.Errorf("get vod streams: %w", err)
+		return nil, fmt.Errorf("get vod streams: %w", err)
 	}
 	slog.Debug("fetched vod streams", "count", len(allStreams))
 
 	streams := allStreams[:0:0]
 	for _, st := range allStreams {
-		if excludedCats[vodCategoryKey(st.CategoryID)] {
-			excluded[fmt.Sprintf("%s:%d", index.TypeMovie, st.ID.Int())] = true
+		if excludedCats[src.catKey(vodCategoryKey(st.CategoryID))] {
+			excluded[src.itemKey(index.TypeMovie, st.ID.Int())] = true
 			continue
 		}
 		streams = append(streams, st)
@@ -608,9 +651,9 @@ func (s *Scheduler) fetchAll(ctx context.Context) (items []*index.Item, excluded
 
 	for i, st := range streams {
 		if ctx.Err() != nil {
-			return nil, nil, ctx.Err()
+			return nil, ctx.Err()
 		}
-		s.setProgress("Fetching VOD catalog", i+1, len(streams))
+		s.setProgress(label("Fetching VOD catalog"), i+1, len(streams))
 
 		year := st.Year.String()
 		if year == "" {
@@ -630,8 +673,10 @@ func (s *Scheduler) fetchAll(ctx context.Context) (items []*index.Item, excluded
 			ReleaseDate:  st.ReleaseDate,
 			ContainerExt: st.ContainerExt,
 			Duration:     parseDuration(st.Duration),
-			CategoryKey:  vodCategoryKey(st.CategoryID),
+			CategoryKey:  src.catKey(vodCategoryKey(st.CategoryID)),
 			Category:     vodCats[st.CategoryID],
+			Provider:     src.id,
+			ProviderName: src.extraName(),
 		}
 		if st.TMDBId.Int() > 0 {
 			item.TMDBId = strconv.Itoa(st.TMDBId.Int())
@@ -641,24 +686,21 @@ func (s *Scheduler) fetchAll(ctx context.Context) (items []*index.Item, excluded
 	}
 
 	// --- Series ---
-	s.setProgress("Fetching series catalog", 0, 0)
-	allSeries, err := s.xtream.GetSeries(ctx, "")
+	s.setProgress(label("Fetching series catalog"), 0, 0)
+	allSeries, err := xc.GetSeries(ctx, "")
 	if err != nil {
-		return nil, nil, fmt.Errorf("get series: %w", err)
+		return nil, fmt.Errorf("get series: %w", err)
 	}
 	slog.Debug("fetched series", "count", len(allSeries))
 
 	// Drop excluded groups before fetching episode lists for them.
 	series := allSeries[:0:0]
 	for _, sr := range allSeries {
-		if excludedCats[seriesCategoryKey(sr.CategoryID)] {
-			excluded[fmt.Sprintf("%s:%d", index.TypeSeries, sr.SeriesID.Int())] = true
+		if excludedCats[src.catKey(seriesCategoryKey(sr.CategoryID))] {
+			excluded[src.itemKey(index.TypeSeries, sr.SeriesID.Int())] = true
 			continue
 		}
 		series = append(series, sr)
-	}
-	if len(excluded) > 0 {
-		slog.Info("excluded provider groups", "items_skipped", len(excluded))
 	}
 
 	// Build a lastModified lookup from the bulk response.
@@ -668,7 +710,7 @@ func (s *Scheduler) fetchAll(ctx context.Context) (items []*index.Item, excluded
 	}
 
 	// Load previous snapshot for smart-skip.
-	snapPath := SnapshotPath(s.cfg.Output.Path)
+	snapPath := src.snapshotPath(s.cfg.Output.Path)
 	prevSnap, err := LoadSnapshot(snapPath)
 	if err != nil {
 		slog.Warn("snapshot load failed, rebuilding", "error", err)
@@ -698,7 +740,7 @@ func (s *Scheduler) fetchAll(ctx context.Context) (items []*index.Item, excluded
 	}
 
 	slog.Info("series smart skip", "skipped", len(skippedItems), "fetch", len(toFetch))
-	s.setProgress("Fetching series details", 0, len(toFetch))
+	s.setProgress(label("Fetching series details"), 0, len(toFetch))
 
 	// Worker pool for series that need a GetSeriesInfo call.
 	parallelism := s.cfg.Sync.Parallelism
@@ -731,7 +773,7 @@ func (s *Scheduler) fetchAll(ctx context.Context) (items []*index.Item, excluded
 				sr := work.series
 				item := buildSeriesItem(sr)
 
-				if info, err := s.xtream.GetSeriesInfo(ctx, sr.SeriesID.Int()); err == nil {
+				if info, err := xc.GetSeriesInfo(ctx, sr.SeriesID.Int()); err == nil {
 					for seasonStr, eps := range info.Episodes {
 						season, _ := strconv.Atoi(seasonStr)
 						for _, ep := range eps {
@@ -759,7 +801,7 @@ func (s *Scheduler) fetchAll(ctx context.Context) (items []*index.Item, excluded
 				}
 
 				n := atomic.AddInt64(&progressN, 1)
-				s.setProgress("Fetching series details", int(n), len(toFetch))
+				s.setProgress(label("Fetching series details"), int(n), len(toFetch))
 
 				fetchMu.Lock()
 				fetchedItems[sr.SeriesID.Int()] = item
@@ -770,7 +812,7 @@ func (s *Scheduler) fetchAll(ctx context.Context) (items []*index.Item, excluded
 	wg.Wait()
 
 	if ctx.Err() != nil {
-		return nil, nil, ctx.Err()
+		return nil, ctx.Err()
 	}
 
 	// Merge skipped + fetched in original bulk order.
@@ -781,8 +823,10 @@ func (s *Scheduler) fetchAll(ctx context.Context) (items []*index.Item, excluded
 			item, ok = fetchedItems[id]
 		}
 		if ok {
-			item.CategoryKey = seriesCategoryKey(sr.CategoryID)
+			item.CategoryKey = src.catKey(seriesCategoryKey(sr.CategoryID))
 			item.Category = seriesCats[sr.CategoryID]
+			item.Provider = src.id
+			item.ProviderName = src.extraName()
 			items = append(items, item)
 		}
 	}
@@ -821,7 +865,7 @@ func (s *Scheduler) fetchAll(ctx context.Context) (items []*index.Item, excluded
 		slog.Warn("snapshot save failed", "error", err)
 	}
 
-	return items, excluded, nil
+	return items, nil
 }
 
 // buildSeriesItem constructs a series index.Item from bulk Xtream metadata
@@ -1107,32 +1151,32 @@ func (s *Scheduler) enrich(ctx context.Context, items []*index.Item, cachedByKey
 					}
 				}
 
-			// TVDB fallback: any series without a TVDB ID is searched
-			// directly on TVDB by title — covers both the case where
-			// TMDB had no TVDB cross-link and the case where TMDB
-			// found nothing at all (e.g. Dutch-only shows).
-			if item.Type == index.TypeSeries && item.TVDBId == "" && s.tvdb != nil {
-				if err := s.resolveByTVDB(ctx, item); err != nil {
-					slog.Warn("TVDB fallback failed", "name", item.Name, "error", err)
+				// TVDB fallback: any series without a TVDB ID is searched
+				// directly on TVDB by title — covers both the case where
+				// TMDB had no TVDB cross-link and the case where TMDB
+				// found nothing at all (e.g. Dutch-only shows).
+				if item.Type == index.TypeSeries && item.TVDBId == "" && s.tvdb != nil {
+					if err := s.resolveByTVDB(ctx, item); err != nil {
+						slog.Warn("TVDB fallback failed", "name", item.Name, "error", err)
+					}
 				}
-			}
 
-			item.MatchVersion = matchVersion
+				item.MatchVersion = matchVersion
 
-			// Determine enrichment failure reason from the item's final state,
-			// after all fallback stages have completed. Setting this at
-			// intermediate failure points would be incorrect because a later
-			// fallback stage may recover the item successfully.
-			item.EnrichFailReason = ""
-			if item.IMDBId == "" && item.TVDBId == "" {
-				if item.TMDBId == "" {
-					item.EnrichFailReason = "no TMDB match"
-				} else {
-					item.EnrichFailReason = "TMDB has no IMDB/TVDB cross-reference"
+				// Determine enrichment failure reason from the item's final state,
+				// after all fallback stages have completed. Setting this at
+				// intermediate failure points would be incorrect because a later
+				// fallback stage may recover the item successfully.
+				item.EnrichFailReason = ""
+				if item.IMDBId == "" && item.TVDBId == "" {
+					if item.TMDBId == "" {
+						item.EnrichFailReason = "no TMDB match"
+					} else {
+						item.EnrichFailReason = "TMDB has no IMDB/TVDB cross-reference"
+					}
 				}
-			}
 
-			n := atomic.AddInt64(&progressN, 1)
+				n := atomic.AddInt64(&progressN, 1)
 				s.setProgress("Enriching via TMDB", int(n), total)
 			}
 		}()

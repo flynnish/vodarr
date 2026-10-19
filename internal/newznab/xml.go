@@ -213,10 +213,22 @@ func releaseGroup(category string) string {
 // webDL is the source tag ending a release title, with the item's provider
 // group as release group when it has one: "WEB-DL" or "WEB-DL-ESPeliculas".
 func webDL(item *index.Item) string {
-	if g := releaseGroup(item.Category); g != "" {
+	// An extra provider's name leads its release group ("ProviderBSeriesDrama"),
+	// so copies from different providers can be told apart and ranked. The
+	// primary provider's release groups are unchanged.
+	if g := releaseGroup(strings.TrimSpace(item.ProviderName + " " + item.Category)); g != "" {
 		return "WEB-DL-" + g
 	}
 	return "WEB-DL"
+}
+
+// providerParam is the download link's provider parameter: none for the
+// primary provider, "&provider=<id>" for an extra one.
+func providerParam(item *index.Item) string {
+	if item.Provider == "" {
+		return ""
+	}
+	return "&provider=" + item.Provider
 }
 
 // langTitleTokens maps ISO 639-1 language codes to the uppercase title tokens
@@ -498,14 +510,18 @@ func episodeToRSS(serverURL string, series *index.Item, ep index.EpisodeItem) It
 	}
 	epTag := fmt.Sprintf("S%02dE%02d", ep.Season, ep.EpisodeNum)
 	guid := fmt.Sprintf("vodarr-ep-%d-%d-%d", series.XtreamID, ep.Season, ep.EpisodeNum)
+	if series.Provider != "" {
+		// An extra provider's IDs are its own ID space.
+		guid = fmt.Sprintf("vodarr-ep-%s-%d-%d-%d", series.Provider, series.XtreamID, ep.Season, ep.EpisodeNum)
+	}
 	if series.SourceType != "" {
 		// A VOD stream offered as an episode: its ID is a VOD stream ID and
 		// could equal a real series ID, so keep its GUID apart.
 		guid = fmt.Sprintf("vodarr-ep-%s-%d-%d-%d", series.SourceType, series.XtreamID, ep.Season, ep.EpisodeNum)
 	}
 	// type= names the provider type, which is what identifies the item.
-	downloadURL := fmt.Sprintf("%s/api?t=get&id=%d&type=%s&episode_id=%d",
-		serverURL, series.XtreamID, series.ProviderType(), ep.EpisodeID)
+	downloadURL := fmt.Sprintf("%s/api?t=get&id=%d&type=%s&episode_id=%d%s",
+		serverURL, series.XtreamID, series.ProviderType(), ep.EpisodeID, providerParam(series))
 
 	// Use canonical TMDB/TVDB title when available so Sonarr/Radarr can match
 	// by title (e.g. "Loving Ibiza: Series" instead of "Verliefd op Ibiza").
@@ -609,13 +625,16 @@ func itemToRSS(serverURL string, item *index.Item) Item {
 	}
 
 	guid := fmt.Sprintf("vodarr-%s-%d", item.Type, item.XtreamID)
+	if item.Provider != "" {
+		guid = fmt.Sprintf("vodarr-%s-%s-%d", item.Provider, item.Type, item.XtreamID)
+	}
 	if item.SourceType != "" {
 		// A provider series offered as a film: keep its GUID apart from the
 		// VOD stream that may share its numeric ID.
 		guid = fmt.Sprintf("vodarr-%s-from-%s-%d", item.Type, item.SourceType, item.XtreamID)
 	}
 	// type= names the provider type, which is what identifies the item.
-	downloadURL := fmt.Sprintf("%s/api?t=get&id=%d&type=%s", serverURL, item.XtreamID, item.ProviderType())
+	downloadURL := fmt.Sprintf("%s/api?t=get&id=%d&type=%s%s", serverURL, item.XtreamID, item.ProviderType(), providerParam(item))
 
 	title := buildTitle(item)
 

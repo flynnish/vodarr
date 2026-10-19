@@ -74,7 +74,28 @@ func main() {
 	strmWriter := strm.NewWriter(cfg.Output.Path, cfg.Output.MoviesDir, cfg.Output.SeriesDir)
 	qbitStore := qbit.NewStore()
 
+	// Extra providers: further Xtream accounts synced alongside the primary.
+	extraClients := make(map[string]*xtream.Client)
+	var extraIDs, extraNames []string
+	var extraList []*xtream.Client
+	for _, p := range cfg.Providers()[1:] {
+		c := xtream.NewClient(p.URL, p.Username, p.Password)
+		extraClients[p.ID] = c
+		extraIDs, extraNames, extraList = append(extraIDs, p.ID), append(extraNames, p.Name), append(extraList, c)
+	}
+	if len(extraIDs) > 0 {
+		slog.Info("extra providers", "names", extraNames)
+	}
+	// clientFor is the Xtream client for a provider ID ("" = primary).
+	clientFor := func(provider string) *xtream.Client {
+		if provider == "" {
+			return xc
+		}
+		return extraClients[provider]
+	}
+
 	scheduler := vodarrsync.NewScheduler(cfg, xc, tc, idx, strmWriter)
+	scheduler.SetProviders(extraIDs, extraNames, extraList)
 	// Manual matches live next to config.yml, which is on a mounted volume.
 	if err := scheduler.LoadOverrides(filepath.Join(filepath.Dir(*configPath), "matches.json")); err != nil {
 		slog.Error("failed to load manual matches", "error", err)
@@ -105,6 +126,11 @@ func main() {
 	// 2C: Pass APIKey from config; xc satisfies URLBuilder for on-demand size probing
 	newznab.SetDefaultLanguage(cfg.Output.DefaultLanguage)
 	newznabHandler := newznab.NewHandler(idx, cfg.Server.APIKey, newznabSrvURL, xc)
+	extraURLs := make(map[string]newznab.URLBuilder, len(extraClients))
+	for id, c := range extraClients {
+		extraURLs[id] = c
+	}
+	newznabHandler.SetProviderURLs(extraURLs)
 
 	// Download manager: only created when output.mode == "download"
 	var dlManager *download.Manager
@@ -123,6 +149,7 @@ func main() {
 
 	// 2D: Pass qBit credentials from config; newznabSrvURL used to restrict SSRF to own Newznab host
 	qbitHandler := qbit.NewHandler(qbitStore, strmWriter, xc, probe.DefaultProber, cfg.Output.Path, cfg.Server.QbitUsername, cfg.Server.QbitPassword, newznabSrvURL, cfg.Output.Mode, dlManager)
+	qbitHandler.SetProviders(extraClients)
 	// 2E: Pass web credentials from config
 	updateChecker := update.New()
 	webHandler := web.NewHandler(idx, scheduler, strmWriter, web.StaticFS(), logBuf, cfg, *configPath, cfg.Server.WebUsername, cfg.Server.WebPassword, version, updateChecker)
@@ -133,8 +160,14 @@ func main() {
 	if key, err := streamproxy.LoadOrCreateKey(filepath.Join(filepath.Dir(*configPath), "stream.key")); err != nil {
 		slog.Error("stream proxy unavailable", "error", err)
 	} else {
-		proxy := streamproxy.New(key, cfg.Output.StreamProxyURL, xc.BuildStreamURL)
-		var strmURL func(kind string, id int, ext string) string
+		proxy := streamproxy.New(key, cfg.Output.StreamProxyURL, func(provider, kind string, id int, ext string) string {
+			c := clientFor(provider)
+			if c == nil {
+				return "" // a provider since removed from the config
+			}
+			return c.BuildStreamURL(kind, id, ext)
+		})
+		var strmURL func(provider, kind string, id int, ext string) string
 		if cfg.Output.StreamProxy {
 			strmURL = proxy.URL
 			qbitHandler.SetStrmURL(strmURL)

@@ -29,3 +29,22 @@ func TestStreamURLsFollowProviderType(t *testing.T) {
 		}
 	}
 }
+
+func TestStreamURLsUseTheDescriptorsProvider(t *testing.T) {
+	h := &Handler{xtream: xtream.NewClient("http://primary.example.com", "u", "p")}
+	h.SetProviders(map[string]*xtream.Client{"provb": xtream.NewClient("http://provb.example.com", "u2", "p2")})
+
+	if got := h.movieStreamURL(itemDescriptor{Type: "movie", XtreamID: 10, Provider: "provb"}, "mkv"); got != "http://provb.example.com/movie/u2/p2/10.mkv" {
+		t.Errorf("extra provider stream = %q", got)
+	}
+	if got := h.movieStreamURL(itemDescriptor{Type: "movie", XtreamID: 10}, "mkv"); got != "http://primary.example.com/movie/u/p/10.mkv" {
+		t.Errorf("primary stream = %q", got)
+	}
+	// The stream proxy is asked for the descriptor's provider.
+	var asked string
+	h.SetStrmURL(func(provider, kind string, id int, ext string) string { asked = provider; return "x" })
+	h.strmContent("provb", "movie", 10, "mkv")
+	if asked != "provb" {
+		t.Errorf("proxy asked for provider %q, want provb", asked)
+	}
+}

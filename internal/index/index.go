@@ -78,6 +78,12 @@ type Item struct {
 	// provider's type: XtreamID is a VOD stream ID or a series ID.
 	SourceType MediaType `json:"source_type,omitempty"`
 
+	// Provider is the extra provider the item comes from (its config name
+	// as ID); "" for the primary provider. ProviderName is for display and
+	// release groups. Two providers' Xtream IDs are separate ID spaces.
+	Provider     string `json:"provider,omitempty"`
+	ProviderName string `json:"provider_name,omitempty"`
+
 	// StreamEpisodeID is, for a provider series turned into a movie, the
 	// provider episode whose stream is the film.
 	StreamEpisodeID int `json:"stream_episode_id,omitempty"`
@@ -133,9 +139,15 @@ func New() *Index {
 	}
 }
 
-// xtreamKey builds the composite map key for byXtream lookups.
-func xtreamKey(t MediaType, id int) string {
-	return fmt.Sprintf("%s:%d", t, id)
+// xtreamKey builds the composite map key for byXtream lookups:
+// "<type>:<id>" for the primary provider (unchanged from before extra
+// providers existed, so cached keys still match), "<provider>|<type>:<id>"
+// for an extra one.
+func xtreamKey(provider string, t MediaType, id int) string {
+	if provider == "" {
+		return fmt.Sprintf("%s:%d", t, id)
+	}
+	return fmt.Sprintf("%s|%s:%d", provider, t, id)
 }
 
 // markSharedTitles sets SharedTitle on every series whose title is also used
@@ -187,9 +199,10 @@ func (it *Item) ProviderType() MediaType {
 	return it.Type
 }
 
-// Key identifies an item as "<provider type>:<xtream id>".
+// Key identifies an item: its provider (none for the primary), provider
+// type and Xtream ID, as "<type>:<id>" or "<provider>|<type>:<id>".
 func (it *Item) Key() string {
-	return xtreamKey(it.ProviderType(), it.XtreamID)
+	return xtreamKey(it.Provider, it.ProviderType(), it.XtreamID)
 }
 
 // Replace atomically swaps the entire index content.
@@ -231,16 +244,21 @@ func (idx *Index) Replace(items []*Item) {
 // a series ID), which differs from Item.Type after a type change; if empty,
 // both are tried.
 func (idx *Index) SearchByXtreamID(id int, mediaType string) *Item {
+	return idx.Lookup("", id, mediaType)
+}
+
+// Lookup is SearchByXtreamID for a given provider ("" = primary).
+func (idx *Index) Lookup(provider string, id int, mediaType string) *Item {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 	if mediaType != "" {
-		return idx.byXtream[xtreamKey(MediaType(mediaType), id)]
+		return idx.byXtream[xtreamKey(provider, MediaType(mediaType), id)]
 	}
 	// No type hint: try movie first, then series.
-	if item := idx.byXtream[xtreamKey(TypeMovie, id)]; item != nil {
+	if item := idx.byXtream[xtreamKey(provider, TypeMovie, id)]; item != nil {
 		return item
 	}
-	return idx.byXtream[xtreamKey(TypeSeries, id)]
+	return idx.byXtream[xtreamKey(provider, TypeSeries, id)]
 }
 
 // SearchByIMDB returns a copy of items matching the given IMDB ID (4E).

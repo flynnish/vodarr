@@ -205,20 +205,32 @@ func (w *Writer) RemoveSeries(name string) error {
 //	{scheme}://{host}/{movie|series}/{user}/{pass}/{id}.{ext}
 //
 // Capture groups: (1) scheme+host, (2) stream type, (3) stream ID, (4) extension.
-var xtreamURLRe = regexp.MustCompile(`^https?://[^/]+/(movie|series)/[^/]+/[^/]+/(\d+)\.([^/\n]+)$`)
+var xtreamURLRe = regexp.MustCompile(`^https?://([^/]+)/(movie|series)/([^/]+)/[^/]+/(\d+)\.([^/\n]+)$`)
 
 // proxyURLRe matches VODarr stream proxy URLs, which .strm files hold when
-// the proxy is on: {scheme}://{host}/play/{sig}/{movie|series}/{id}.{ext}
-var proxyURLRe = regexp.MustCompile(`^https?://[^/]+/play/[0-9a-f]+/(movie|series)/(\d+)\.([^/\n]+)$`)
+// the proxy is on: {scheme}://{host}/play/{sig}/[p/{provider}/]{movie|series}/{id}.{ext}
+var proxyURLRe = regexp.MustCompile(`^https?://[^/]+/play/[0-9a-f]+/(?:p/([a-z0-9]+)/)?(movie|series)/(\d+)\.([^/\n]+)$`)
+
+// StreamRef is the stream a .strm file names. A stream-proxy URL names its
+// provider (Proxied, Provider; "" = primary); a provider URL only names the
+// server (Host) and account (User) it belongs to, which the caller matches
+// against its providers.
+type StreamRef struct {
+	Kind, ID, Ext string
+	Proxied       bool
+	Provider      string
+	Host, User    string
+}
 
 // parseStreamURL returns the stream an Xtream or stream-proxy URL names.
-func parseStreamURL(raw string) (kind, id, ext string, ok bool) {
-	for _, re := range []*regexp.Regexp{xtreamURLRe, proxyURLRe} {
-		if m := re.FindStringSubmatch(raw); m != nil {
-			return m[1], m[2], m[3], true
-		}
+func parseStreamURL(raw string) (StreamRef, bool) {
+	if m := xtreamURLRe.FindStringSubmatch(raw); m != nil {
+		return StreamRef{Host: m[1], Kind: m[2], User: m[3], ID: m[4], Ext: m[5]}, true
 	}
-	return "", "", "", false
+	if m := proxyURLRe.FindStringSubmatch(raw); m != nil {
+		return StreamRef{Proxied: true, Provider: m[1], Kind: m[2], ID: m[3], Ext: m[4]}, true
+	}
+	return StreamRef{}, false
 }
 
 // RefreshURLs walks the output directory, finds every .strm file, and rewrites
@@ -233,6 +245,14 @@ func (w *Writer) RefreshURLs(buildURL func(streamType, streamID, ext string) (st
 // .strm files into. Each folder is walked once; files outside it (through a
 // symlinked folder) are skipped.
 func RefreshURLsIn(roots []string, buildURL func(streamType, streamID, ext string) (string, error)) (int, error) {
+	return RefreshStreams(roots, func(ref StreamRef) (string, error) {
+		return buildURL(ref.Kind, ref.ID, ref.Ext)
+	})
+}
+
+// RefreshStreams is RefreshURLsIn with the full StreamRef, so the caller can
+// tell providers apart. buildURL returning "" leaves a file unchanged.
+func RefreshStreams(roots []string, buildURL func(StreamRef) (string, error)) (int, error) {
 	count := 0
 	var firstErr error
 	keep := func(err error) {
@@ -271,12 +291,12 @@ func RefreshURLsIn(roots []string, buildURL func(streamType, streamID, ext strin
 			}
 
 			rawURL := strings.TrimSpace(string(data))
-			streamType, streamIDStr, ext, ok := parseStreamURL(rawURL)
+			ref, ok := parseStreamURL(rawURL)
 			if !ok {
 				return nil // not a VODarr stream: leave it alone
 			}
 
-			newURL, buildErr := buildURL(streamType, streamIDStr, ext)
+			newURL, buildErr := buildURL(ref)
 			if buildErr != nil {
 				keep(buildErr)
 				slog.Warn("strm refresh: buildURL failed", "path", absPath, "error", buildErr)

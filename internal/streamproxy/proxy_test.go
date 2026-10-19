@@ -37,14 +37,18 @@ func newProxy(t *testing.T, upstreamBase string) *Proxy {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(key, "http://vodarr:9090/", func(kind string, id int, ext string) string {
-		return upstreamBase + "/" + kind + "/user/secret/" + strconv.Itoa(id) + "." + ext
+	return New(key, "http://vodarr:9090/", func(provider, kind string, id int, ext string) string {
+		user := "user"
+		if provider != "" {
+			user = provider + "user"
+		}
+		return upstreamBase + "/" + kind + "/" + user + "/secret/" + strconv.Itoa(id) + "." + ext
 	})
 }
 
 func TestURLHidesCredentials(t *testing.T) {
 	p := newProxy(t, "http://provider.example.com")
-	u := p.URL("movie", 42, "mkv")
+	u := p.URL("", "movie", 42, "mkv")
 	if !strings.HasPrefix(u, "http://vodarr:9090/play/") || !strings.HasSuffix(u, "/movie/42.mkv") {
 		t.Errorf("URL = %q", u)
 	}
@@ -56,7 +60,7 @@ func TestURLHidesCredentials(t *testing.T) {
 func TestRelaysWithRangeAndFollowsRedirects(t *testing.T) {
 	up := provider(t)
 	p := newProxy(t, up.URL)
-	path := strings.TrimPrefix(p.URL("movie", 42, "mkv"), "http://vodarr:9090")
+	path := strings.TrimPrefix(p.URL("", "movie", 42, "mkv"), "http://vodarr:9090")
 
 	req := httptest.NewRequest("GET", path, nil)
 	req.Header.Set("Range", "bytes=5-9")
@@ -86,7 +90,7 @@ func TestRelaysWithRangeAndFollowsRedirects(t *testing.T) {
 
 func TestRejectsForgedAndOtherStreams(t *testing.T) {
 	p := newProxy(t, provider(t).URL)
-	good := strings.TrimPrefix(p.URL("movie", 42, "mkv"), "http://vodarr:9090")
+	good := strings.TrimPrefix(p.URL("", "movie", 42, "mkv"), "http://vodarr:9090")
 
 	for _, path := range []string{
 		strings.Replace(good, "/42.mkv", "/43.mkv", 1),        // another stream, same signature
@@ -144,7 +148,7 @@ func TestStreamOutlivesServerWriteTimeout(t *testing.T) {
 	front.Start()
 	defer front.Close()
 
-	resp, err := http.Get(front.URL + strings.TrimPrefix(p.URL("movie", 1, "mkv"), "http://vodarr:9090"))
+	resp, err := http.Get(front.URL + strings.TrimPrefix(p.URL("", "movie", 1, "mkv"), "http://vodarr:9090"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,5 +156,28 @@ func TestStreamOutlivesServerWriteTimeout(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil || string(body) != "xxxxxx" {
 		t.Errorf("got %q, %v; want the whole stream past the write timeout", body, err)
+	}
+}
+
+func TestExtraProviderStreams(t *testing.T) {
+	p := newProxy(t, provider(t).URL)
+	primary := p.URL("", "movie", 42, "mkv")
+	extra := p.URL("provb", "movie", 42, "mkv")
+	if !strings.Contains(extra, "/p/provb/movie/42.mkv") || extra == primary {
+		t.Fatalf("extra provider URL = %q (primary %q)", extra, primary)
+	}
+	// A signature is bound to its provider: moving it to another fails.
+	moved := strings.Replace(strings.TrimPrefix(extra, "http://vodarr:9090"), "/p/provb/", "/p/other/", 1)
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, httptest.NewRequest("GET", moved, nil))
+	if w.Code != http.StatusNotFound {
+		t.Errorf("signature accepted for another provider: %d", w.Code)
+	}
+	// The extra provider's stream is fetched from its own account (the test
+	// provider only serves "user", so provb's request is a 404 upstream).
+	w = httptest.NewRecorder()
+	p.ServeHTTP(w, httptest.NewRequest("GET", strings.TrimPrefix(extra, "http://vodarr:9090"), nil))
+	if w.Code != http.StatusNotFound {
+		t.Errorf("extra provider stream: status %d, want the upstream 404", w.Code)
 	}
 }

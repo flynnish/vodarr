@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/vodarr/vodarr/internal/config"
 )
 
 func TestPutCategoriesSavesConfig(t *testing.T) {
@@ -121,5 +123,32 @@ func TestFixDownloadClientLeavesGoodClientAlone(t *testing.T) {
 	}
 	if res := fixDownloadClient(do, arr.URL, 4, "radarr"); res["skipped"] == nil || puts != 0 {
 		t.Errorf("result %v, PUTs %d; want skipped and no PUT (an existing category is kept)", res, puts)
+	}
+}
+
+func TestProviderOf(t *testing.T) {
+	providers := []config.Provider{
+		{ID: "", URL: "http://primary.example.com", Username: "alice"},
+		{ID: "provb", URL: "http://provb.example.com:8080", Username: "bob"},
+		{ID: "provc", URL: "http://shared.example.com", Username: "carol"},
+		{ID: "provd", URL: "http://shared.example.com", Username: "dave"},
+	}
+	cases := []struct {
+		host, user string
+		want       string
+		ok         bool
+	}{
+		{"primary.example.com", "alice", "", true},
+		{"provb.example.com:8080", "bob", "provb", true},
+		{"provb.example.com:8080", "oldname", "provb", true}, // login changed: the only one on that host
+		{"shared.example.com", "dave", "provd", true},
+		{"shared.example.com", "eve", "", false}, // two providers there, neither account
+		{"unknown.example.com", "x", "", false},
+	}
+	for _, c := range cases {
+		got, ok := providerOf(providers, c.host, c.user)
+		if got != c.want || ok != c.ok {
+			t.Errorf("providerOf(%s, %s) = %q, %v; want %q, %v", c.host, c.user, got, ok, c.want, c.ok)
+		}
 	}
 }

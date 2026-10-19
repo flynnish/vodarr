@@ -22,10 +22,12 @@ import (
 )
 
 // categoryKeyRe validates excluded group keys ("vod:<id>" / "series:<id>").
-var categoryKeyRe = regexp.MustCompile(`^(vod|series):[^\s]{1,64}$`)
+// An extra provider's keys are qualified: "<provider>|vod:<id>".
+var categoryKeyRe = regexp.MustCompile(`^([a-z0-9]+\|)?(vod|series):[^\s|]{1,64}$`)
 
 type categoryResp struct {
 	Key      string `json:"key"`
+	Provider string `json:"provider"` // provider name, for display
 	Type     string `json:"type"` // "movie" or "series"
 	Name     string `json:"name"`
 	Count    int    `json:"count"` // items currently indexed from this group
@@ -37,7 +39,7 @@ type categoryResp struct {
 // groups have no indexed items, so their count is 0.
 func (h *Handler) handleGetCategories(w http.ResponseWriter, r *http.Request) {
 	h.cfgMu.RLock()
-	xcfg := h.cfg.Xtream
+	providers := h.cfg.Providers()
 	excluded := make(map[string]bool)
 	for _, k := range h.cfg.Sync.ExcludedCategories {
 		excluded[k] = true
@@ -46,18 +48,6 @@ func (h *Handler) handleGetCategories(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	xc := xtream.NewClient(xcfg.URL, xcfg.Username, xcfg.Password)
-
-	vod, err := xc.GetVODCategories(ctx)
-	if err != nil {
-		h.writeJSONStatus(w, http.StatusBadGateway, map[string]string{"error": "provider: " + err.Error()})
-		return
-	}
-	series, err := xc.GetSeriesCategories(ctx)
-	if err != nil {
-		h.writeJSONStatus(w, http.StatusBadGateway, map[string]string{"error": "provider: " + err.Error()})
-		return
-	}
 
 	counts := make(map[string]int)
 	for _, item := range h.idx.All() {
@@ -66,16 +56,44 @@ func (h *Handler) handleGetCategories(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	out := make([]categoryResp, 0, len(vod)+len(series))
-	for _, c := range vod {
-		k := "vod:" + c.ID
-		out = append(out, categoryResp{Key: k, Type: "movie", Name: c.Name, Count: counts[k], Excluded: excluded[k]})
+	// Each provider's groups; one that cannot be reached is reported but
+	// does not hide the others.
+	out := []categoryResp{}
+	var failed []string
+	for _, p := range providers {
+		qualify := func(k string) string {
+			if p.ID == "" {
+				return k
+			}
+			return p.ID + "|" + k
+		}
+		xc := xtream.NewClient(p.URL, p.Username, p.Password)
+		vod, err := xc.GetVODCategories(ctx)
+		if err == nil {
+			var series []xtream.Category
+			if series, err = xc.GetSeriesCategories(ctx); err == nil {
+				for _, c := range vod {
+					k := qualify("vod:" + c.ID)
+					out = append(out, categoryResp{Key: k, Provider: p.Name, Type: "movie", Name: c.Name, Count: counts[k], Excluded: excluded[k]})
+				}
+				for _, c := range series {
+					k := qualify("series:" + c.ID)
+					out = append(out, categoryResp{Key: k, Provider: p.Name, Type: "series", Name: c.Name, Count: counts[k], Excluded: excluded[k]})
+				}
+				continue
+			}
+		}
+		failed = append(failed, p.Name+": "+err.Error())
 	}
-	for _, c := range series {
-		k := "series:" + c.ID
-		out = append(out, categoryResp{Key: k, Type: "series", Name: c.Name, Count: counts[k], Excluded: excluded[k]})
+	if len(out) == 0 && len(failed) > 0 {
+		h.writeJSONStatus(w, http.StatusBadGateway, map[string]string{"error": "provider: " + strings.Join(failed, "; ")})
+		return
 	}
-	h.writeJSON(w, map[string]interface{}{"categories": out})
+	resp := map[string]interface{}{"categories": out, "providers": len(providers)}
+	if len(failed) > 0 {
+		resp["error"] = "could not load groups of " + strings.Join(failed, "; ")
+	}
+	h.writeJSON(w, resp)
 }
 
 // handlePutCategories saves the excluded groups to config.yml and removes
@@ -200,6 +218,7 @@ func (h *Handler) handleMatchSearch(w http.ResponseWriter, r *http.Request) {
 type matchRequest struct {
 	Type     string `json:"type"` // provider type, "movie" or "series": identifies the item
 	XtreamID int    `json:"xtream_id"`
+	Provider string `json:"provider"` // "" = primary provider
 	TMDBId   string `json:"tmdb_id"`
 	TVDBId   string `json:"tvdb_id"`
 
@@ -232,7 +251,7 @@ func (h *Handler) handlePutMatch(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	item, err := h.scheduler.SetMatch(ctx, mt, req.XtreamID, vodarrsync.MatchOverride{
+	item, err := h.scheduler.SetMatchFor(ctx, req.Provider, mt, req.XtreamID, vodarrsync.MatchOverride{
 		TMDBId: req.TMDBId, TVDBId: req.TVDBId,
 		AsType: req.AsType, Season: req.Season, Episode: req.Episode, EpisodeID: req.EpisodeID,
 		SeasonOffset: req.SeasonOffset,
@@ -254,7 +273,7 @@ func (h *Handler) handleDeleteMatch(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	item, err := h.scheduler.ClearMatch(ctx, mt, id)
+	item, err := h.scheduler.ClearMatchFor(ctx, r.URL.Query().Get("provider"), mt, id)
 	h.writeMatchResult(w, item, err)
 }
 

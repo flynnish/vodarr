@@ -35,7 +35,16 @@ type Handler struct {
 	apiKey    string
 	serverURL string // e.g. "http://vodarr:7878"
 	urls      URLBuilder
-	sizeCache sync.Map // "m:{xtreamID}" → int64
+	sizeCache sync.Map // "m:{provider}:{xtreamID}" → int64
+
+	// providerURLs are the extra providers' clients, by provider ID.
+	providerURLs map[string]URLBuilder
+}
+
+// SetProviderURLs sets the extra providers' clients (by provider ID), used
+// to estimate their movies' file sizes. Call before serving.
+func (h *Handler) SetProviderURLs(urls map[string]URLBuilder) {
+	h.providerURLs = urls
 }
 
 func NewHandler(idx *index.Index, apiKey, serverURL string, urls URLBuilder) *Handler {
@@ -267,7 +276,8 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) {
 
 	episodeID, _ := strconv.Atoi(episodeIDStr)
 
-	found := h.idx.SearchByXtreamID(id, mediaType)
+	provider := q.Get("provider") // "" = primary provider
+	found := h.idx.Lookup(provider, id, mediaType)
 	if found == nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -327,6 +337,9 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) {
 	if found.SourceType != "" {
 		desc["source_type"] = string(found.SourceType)
 		desc["stream_episode_id"] = found.StreamEpisodeID
+	}
+	if found.Provider != "" {
+		desc["provider"] = found.Provider
 	}
 
 	descJSON, err := json.Marshal(desc)
@@ -521,11 +534,18 @@ func (h *Handler) probeItemSizes(ctx context.Context, items []*index.Item, seaso
 		if item.SourceType != "" {
 			continue // a provider episode offered as a film: XtreamID is not a VOD stream ID
 		}
-		key := fmt.Sprintf("m:%d", item.XtreamID)
+		urls := h.urls
+		if item.Provider != "" {
+			urls = h.providerURLs[item.Provider]
+		}
+		if urls == nil {
+			continue
+		}
+		key := fmt.Sprintf("m:%s:%d", item.Provider, item.XtreamID)
 		if v, ok := h.sizeCache.Load(key); ok {
 			item.FileSize = v.(int64)
 		} else if probeCount < maxProbesPerRequest {
-			size := h.urls.EstimateMovieFileSize(ctx, item.XtreamID)
+			size := urls.EstimateMovieFileSize(ctx, item.XtreamID)
 			probeCount++
 			if size > 0 {
 				h.sizeCache.Store(key, size)

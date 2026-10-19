@@ -27,10 +27,11 @@ import (
 	"time"
 )
 
-// Upstream builds the provider URL for a stream ("movie" or "series" kind;
-// episodes use the series kind with their episode ID), as
-// xtream.Client.BuildStreamURL does. It returns "" for an unknown kind.
-type Upstream func(kind string, id int, ext string) string
+// Upstream builds the provider URL for a stream of a provider ("" = the
+// primary; "movie" or "series" kind, episodes use the series kind with
+// their episode ID), as xtream.Client.BuildStreamURL does. It returns "" for
+// an unknown provider or kind.
+type Upstream func(provider, kind string, id int, ext string) string
 
 // Proxy signs stream URLs and relays the streams they name.
 type Proxy struct {
@@ -92,22 +93,32 @@ func LoadOrCreateKey(path string) ([]byte, error) {
 	return key, nil
 }
 
-func (p *Proxy) sign(kind string, id int) string {
+// sign is the stream's signature. The primary provider's is over
+// "<kind>/<id>" alone, as before extra providers, so its URLs stay valid.
+func (p *Proxy) sign(provider, kind string, id int) string {
 	m := hmac.New(sha256.New, p.key)
-	fmt.Fprintf(m, "%s/%d", kind, id)
+	if provider == "" {
+		fmt.Fprintf(m, "%s/%d", kind, id)
+	} else {
+		fmt.Fprintf(m, "%s|%s/%d", provider, kind, id)
+	}
 	return hex.EncodeToString(m.Sum(nil))[:32]
 }
 
 // URL is the .strm content for a stream: a VODarr address instead of the
 // provider's. The extension stays last; players infer the container from it.
-func (p *Proxy) URL(kind string, id int, ext string) string {
+// An extra provider's streams carry it: /play/<sig>/p/<provider>/...
+func (p *Proxy) URL(provider, kind string, id int, ext string) string {
 	if ext == "" {
 		ext = "mkv"
 	}
-	return fmt.Sprintf("%s/play/%s/%s/%d.%s", p.base, p.sign(kind, id), kind, id, ext)
+	if provider == "" {
+		return fmt.Sprintf("%s/play/%s/%s/%d.%s", p.base, p.sign("", kind, id), kind, id, ext)
+	}
+	return fmt.Sprintf("%s/play/%s/p/%s/%s/%d.%s", p.base, p.sign(provider, kind, id), provider, kind, id, ext)
 }
 
-var playPathRe = regexp.MustCompile(`^/play/([0-9a-f]{32})/(movie|series)/(\d+)\.([A-Za-z0-9]{1,8})$`)
+var playPathRe = regexp.MustCompile(`^/play/([0-9a-f]{32})/(?:p/([a-z0-9]+)/)?(movie|series)/(\d+)\.([A-Za-z0-9]{1,8})$`)
 
 // relayedHeaders are the response headers passed back to the media server;
 // they are what seeking and container detection need.
@@ -128,13 +139,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	sig, kind, ext := m[1], m[2], m[4]
-	id, err := strconv.Atoi(m[3])
-	if err != nil || id <= 0 || !hmac.Equal([]byte(sig), []byte(p.sign(kind, id))) {
+	sig, provider, kind, ext := m[1], m[2], m[3], m[5]
+	id, err := strconv.Atoi(m[4])
+	if err != nil || id <= 0 || !hmac.Equal([]byte(sig), []byte(p.sign(provider, kind, id))) {
 		http.NotFound(w, r) // never confirm which streams exist
 		return
 	}
-	target := p.upstream(kind, id, ext)
+	target := p.upstream(provider, kind, id, ext)
 	if target == "" {
 		http.NotFound(w, r)
 		return

@@ -68,8 +68,8 @@ func shiftSeasons(eps []index.EpisodeItem, by int) []index.EpisodeItem {
 // ErrItemNotFound is returned when a manual match names an unknown item.
 var ErrItemNotFound = errors.New("item not found")
 
-func itemKey(t index.MediaType, xtreamID int) string {
-	return fmt.Sprintf("%s:%d", t, xtreamID)
+func itemKey(provider string, t index.MediaType, xtreamID int) string {
+	return (&index.Item{Provider: provider, Type: t, XtreamID: xtreamID}).Key()
 }
 
 // LoadOverrides reads manual matches from path (a missing file is fine) and
@@ -280,6 +280,11 @@ func (s *Scheduler) reapplyOverrides(ctx context.Context, items []*index.Item) {
 // index immediately. It is kept across syncs until ClearMatch. mediaType is
 // the provider type, which identifies the item.
 func (s *Scheduler) SetMatch(ctx context.Context, mediaType index.MediaType, xtreamID int, ov MatchOverride) (*index.Item, error) {
+	return s.SetMatchFor(ctx, "", mediaType, xtreamID, ov)
+}
+
+// SetMatchFor is SetMatch for an item of the given provider ("" = primary).
+func (s *Scheduler) SetMatchFor(ctx context.Context, provider string, mediaType index.MediaType, xtreamID int, ov MatchOverride) (*index.Item, error) {
 	ov.TMDBId = strings.TrimSpace(ov.TMDBId)
 	ov.TVDBId = strings.TrimSpace(ov.TVDBId)
 	for _, id := range []string{ov.TMDBId, ov.TVDBId} {
@@ -291,7 +296,7 @@ func (s *Scheduler) SetMatch(ctx context.Context, mediaType index.MediaType, xtr
 		return nil, errors.New("a TMDB or TVDB ID is required")
 	}
 
-	item := s.idx.SearchByXtreamID(xtreamID, string(mediaType))
+	item := s.idx.Lookup(provider, xtreamID, string(mediaType))
 	if item == nil {
 		return nil, ErrItemNotFound
 	}
@@ -347,7 +352,7 @@ func (s *Scheduler) SetMatch(ctx context.Context, mediaType index.MediaType, xtr
 	if s.overrides == nil {
 		s.overrides = make(map[string]MatchOverride)
 	}
-	s.overrides[itemKey(mediaType, xtreamID)] = ov
+	s.overrides[itemKey(provider, mediaType, xtreamID)] = ov
 	err := s.saveOverridesLocked()
 	s.overridesMu.Unlock()
 	if err != nil {
@@ -367,13 +372,18 @@ func (s *Scheduler) SetMatch(ctx context.Context, mediaType index.MediaType, xtr
 // ClearMatch removes a manual match and re-runs automatic matching for the
 // item, starting from the TMDB ID the provider tagged it with (if any).
 func (s *Scheduler) ClearMatch(ctx context.Context, mediaType index.MediaType, xtreamID int) (*index.Item, error) {
-	item := s.idx.SearchByXtreamID(xtreamID, string(mediaType))
+	return s.ClearMatchFor(ctx, "", mediaType, xtreamID)
+}
+
+// ClearMatchFor is ClearMatch for an item of the given provider ("" = primary).
+func (s *Scheduler) ClearMatchFor(ctx context.Context, provider string, mediaType index.MediaType, xtreamID int) (*index.Item, error) {
+	item := s.idx.Lookup(provider, xtreamID, string(mediaType))
 	if item == nil {
 		return nil, ErrItemNotFound
 	}
 
 	s.overridesMu.Lock()
-	delete(s.overrides, itemKey(mediaType, xtreamID))
+	delete(s.overrides, itemKey(provider, mediaType, xtreamID))
 	err := s.saveOverridesLocked()
 	s.overridesMu.Unlock()
 	if err != nil {

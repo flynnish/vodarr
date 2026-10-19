@@ -15,7 +15,8 @@ function useContent(type) {
 
   // Swap or drop one item after a manual match, without refetching. Items
   // are identified by provider type + ID, which a type change keeps.
-  const sameItem = (a, b) => a.XtreamID === b.XtreamID && (a.source_type || a.Type) === (b.source_type || b.Type)
+  const sameItem = (a, b) => a.XtreamID === b.XtreamID && (a.provider || '') === (b.provider || '') &&
+    (a.source_type || a.Type) === (b.source_type || b.Type)
   const updateItem = updated => setData(d => d && {
     ...d,
     items: d.items.map(i => (sameItem(i, updated) ? updated : i)),
@@ -291,6 +292,11 @@ export default function Content({ initialFilter = 'all', onFilterChange }) {
                       {item.CanonicalName}
                     </p>
                   )}
+                  {item.provider_name && (
+                    <p className="font-mono text-[10px] text-sky-300/70 truncate mt-0.5" title="Extra provider">
+                      {item.provider_name}
+                    </p>
+                  )}
                   {item.category && (
                     <p className="font-mono text-[10px] text-steel-500 truncate mt-0.5" title="Provider group">
                       {item.category}
@@ -464,10 +470,10 @@ function MatchDialog({ item, onClose, onUpdated }) {
   const apply = body => send('/api/match', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type: providerType, xtream_id: item.XtreamID, ...body, ...typeChange() }),
+    body: JSON.stringify({ type: providerType, xtream_id: item.XtreamID, provider: item.provider || '', ...body, ...typeChange() }),
   })
 
-  const reset = () => send(`/api/match?type=${providerType}&xtream_id=${item.XtreamID}`, { method: 'DELETE' })
+  const reset = () => send(`/api/match?type=${providerType}&xtream_id=${item.XtreamID}&provider=${encodeURIComponent(item.provider || '')}`, { method: 'DELETE' })
 
   const input = 'px-3 py-1.5 bg-void-900/40 border border-void-600 rounded font-mono text-[12px] text-steel-300 placeholder-steel-500'
   const typeLabel = t => (t === 'movie' ? 'Movie (Radarr)' : providerType === 'movie' ? 'TV episode (Sonarr)' : 'Series (Sonarr)')

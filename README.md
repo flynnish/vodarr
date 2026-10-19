@@ -170,6 +170,12 @@ Providers often carry the same show or movie in several language groups (e.g. `E
 
 Saving takes effect at once: items from excluded groups disappear from searches immediately, with no restart. They are left out of every later sync without going through the grace period, and VODarr does not delete any files for them. The choice is stored in `config.yml` as `sync.excluded_categories`.
 
+## Several providers
+
+Add further Xtream accounts under **Settings → Extra Providers** (or `extra_providers` in `config.yml`) so titles one provider lacks can come from another. Every provider is synced; a provider that is down does not stop the others, and its titles are kept through the grace period. Copies from an extra provider carry its name in the release group (`WEB-DL-ProviderBSeriesDrama`), so Sonarr/Radarr show where each copy comes from and custom formats can rank providers. Excluded groups, manual matches, the stream proxy and **Rewrite .strm files** all work per provider.
+
+Your original provider stays the primary: its titles, release names, matches and `.strm` files are exactly as before. Give each extra provider a name and keep it: its titles and `.strm` files are identified by it.
+
 ## Language and provider group in release names
 
 Each release name carries the provider group it comes from as its **release group** (the part after the last dash), e.g. `Scrubs.2026.S01E01.SPANISH.WEB-DL-ESSeries.mp4`, and a language word for the language the stream's name or its group names (`ES | Películas`, `GER | Series`, `Germany Series`, `Spanish Movies`, `┃NL┃ Show`). When neither names one, the release is left unlabelled by default and Sonarr/Radarr assume the show's or film's **original language**; to label all of those with one language instead, set **Settings → Output → Default Language** (`output.default_language`, e.g. `en`). Sonarr and Radarr show the release group in search results, so copies of a title from different groups can be told apart, and **custom formats** can score them: a *Release Group* condition (e.g. regex `^EN`) to prefer or avoid groups, or a *Language* condition to prefer a language.

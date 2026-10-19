@@ -12,8 +12,11 @@ import (
 )
 
 type Config struct {
-	Xtream  XtreamConfig  `yaml:"xtream"`
-	TMDB    TMDBConfig    `yaml:"tmdb"`
+	Xtream XtreamConfig `yaml:"xtream"`
+	// ExtraProviders are further Xtream accounts whose catalogs are synced
+	// alongside the primary (xtream) one, e.g. for titles it lacks.
+	ExtraProviders []ProviderConfig `yaml:"extra_providers,omitempty"`
+	TMDB           TMDBConfig       `yaml:"tmdb"`
 	Output  OutputConfig  `yaml:"output"`
 	Sync    SyncConfig    `yaml:"sync"`
 	Server  ServerConfig  `yaml:"server"`
@@ -40,7 +43,55 @@ type ArrInstance struct {
 	APIKey string `yaml:"api_key"`
 }
 
+// ProviderConfig is an extra Xtream provider. Name identifies it (its
+// entries, release groups and .strm URLs carry it) and must stay stable.
+type ProviderConfig struct {
+	Name     string `yaml:"name"`
+	URL      string `yaml:"url"`
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+}
+
+// Provider is one Xtream source as the rest of VODarr sees it. The primary
+// provider (xtream) has ID ""; its entries keep their original keys, so
+// caches, manual matches and .strm files from before extra providers carry
+// over unchanged.
+type Provider struct {
+	ID       string // "" for the primary provider, else ProviderID(Name)
+	Name     string // for display and release groups
+	URL      string
+	Username string
+	Password string
+}
+
+// ProviderID turns a provider name into its ID: lowercase letters and
+// digits only.
+func ProviderID(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// Providers lists the primary provider first, then the extra ones.
+func (c *Config) Providers() []Provider {
+	name := c.Xtream.Name
+	if name == "" {
+		name = "Primary"
+	}
+	out := []Provider{{Name: name, URL: c.Xtream.URL, Username: c.Xtream.Username, Password: c.Xtream.Password}}
+	for _, p := range c.ExtraProviders {
+		out = append(out, Provider{ID: ProviderID(p.Name), Name: p.Name, URL: p.URL, Username: p.Username, Password: p.Password})
+	}
+	return out
+}
+
 type XtreamConfig struct {
+	// Name labels the primary provider in the UI (default "Primary").
+	Name     string `yaml:"name,omitempty"`
 	URL      string `yaml:"url"`
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
@@ -222,6 +273,19 @@ func (c *Config) validate() error {
 	}
 	if c.Xtream.Password == "" {
 		return fmt.Errorf("xtream.password is required")
+	}
+	seen := map[string]bool{}
+	for i, p := range c.ExtraProviders {
+		id := ProviderID(p.Name)
+		switch {
+		case id == "":
+			return fmt.Errorf("extra_providers[%d]: name is required (letters or digits)", i)
+		case seen[id] || id == "primary":
+			return fmt.Errorf("extra_providers[%d]: name %q is already used", i, p.Name)
+		case p.URL == "" || p.Username == "" || p.Password == "":
+			return fmt.Errorf("extra provider %q: url, username and password are required", p.Name)
+		}
+		seen[id] = true
 	}
 	if c.TMDB.APIKey == "" {
 		return fmt.Errorf("tmdb.api_key is required")

@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 
 const DEFAULT = {
-  xtream: { url: '', username: '', password: '' },
+  xtream: { name: '', url: '', username: '', password: '' },
+  extra_providers: [],
   tmdb: { api_key: '', tvdb_api_key: '' },
   output: { path: '/data/strm', movies_dir: 'movies', series_dir: 'tv', mode: 'strm', max_concurrent_downloads: 1, download_delay: '30s', bandwidth_limit: '', default_language: 'original', stream_proxy: false, stream_proxy_url: '' },
   sync: { interval: '6h', on_startup: true, parallelism: 10, title_cleanup_patterns: [] },
@@ -205,11 +206,62 @@ function RepairImports() {
   )
 }
 
+// ExtraProvider edits one extra Xtream provider, with its own connection test.
+function ExtraProvider({ provider, onChange, onRemove }) {
+  const [test, setTest] = useState({ loading: false, success: false, error: null })
+
+  const run = async () => {
+    setTest({ loading: true, success: false, error: null })
+    try {
+      const res = await fetch('/api/test-xtream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: provider.url, username: provider.username, password: provider.password, provider: provider.name }),
+      })
+      const data = await res.json()
+      setTest(data.success
+        ? { loading: false, success: true, error: null }
+        : { loading: false, success: false, error: data.error || 'Connection failed' })
+    } catch (e) {
+      setTest({ loading: false, success: false, error: e.message })
+    }
+  }
+
+  return (
+    <div className="border border-void-600 rounded p-4 space-y-3">
+      <div className="flex items-center justify-end">
+        <button type="button" onClick={onRemove} className="font-mono text-[11px] text-steel-500 hover:text-red-400 transition-colors">
+          Remove
+        </button>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Name" hint="Letters and digits; shown in release groups.">
+          <TextInput value={provider.name} onChange={v => onChange('name', v)} placeholder="ProviderB" />
+        </Field>
+        <Field label="Server URL">
+          <TextInput value={provider.url} onChange={v => onChange('url', v)} placeholder="http://provider-b.example.com" monospace />
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Username">
+          <TextInput value={provider.username} onChange={v => onChange('username', v)} monospace />
+        </Field>
+        <Field label="Password">
+          <TextInput value={provider.password} onChange={v => onChange('password', v)} type="password" monospace />
+        </Field>
+      </div>
+      <TestButton onClick={run} loading={test.loading} success={test.success} error={test.error} />
+    </div>
+  )
+}
+
 // ProviderGroups lists the provider's categories so whole groups (e.g. every
 // Spanish one) can be left out of the index. It saves on its own, outside
 // the main config form, and needs no restart.
 function ProviderGroups() {
   const [groups, setGroups] = useState(null)
+  const [multiProvider, setMultiProvider] = useState(false)
+  const [partialError, setPartialError] = useState(null)
   const [excluded, setExcluded] = useState(new Set())
   const [savedExcluded, setSavedExcluded] = useState(new Set())
   const [kind, setKind] = useState('movie')
@@ -228,6 +280,8 @@ function ProviderGroups() {
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
       const ex = new Set(data.categories.filter(c => c.excluded).map(c => c.key))
       setGroups(data.categories)
+      setMultiProvider((data.providers || 1) > 1)
+      setPartialError(data.error || null)
       setExcluded(ex)
       setSavedExcluded(new Set(ex))
     } catch (e) {
@@ -238,7 +292,7 @@ function ProviderGroups() {
   }
 
   const shown = (groups || []).filter(g =>
-    g.type === kind && (!query || g.name.toLowerCase().includes(query.toLowerCase())))
+    g.type === kind && (!query || `${g.provider || ''} ${g.name}`.toLowerCase().includes(query.toLowerCase())))
 
   const toggle = key => setExcluded(prev => {
     const next = new Set(prev)
@@ -327,6 +381,7 @@ function ProviderGroups() {
         <button type="button" onClick={() => setShown(true)} className="text-steel-400 hover:text-red-400">Exclude all shown</button>
         <button type="button" onClick={() => setShown(false)} className="text-steel-400 hover:text-lime-400">Include all shown</button>
       </div>
+      {partialError && <p className="font-mono text-[11px] text-amber-400">{partialError}</p>}
       <div className="max-h-80 overflow-y-auto border border-void-600 rounded divide-y divide-void-600/50">
         {shown.length === 0 ? (
           <p className="px-3 py-4 font-mono text-[11px] text-steel-500">No groups match.</p>
@@ -336,6 +391,7 @@ function ProviderGroups() {
             <label key={g.key} className="flex items-center gap-3 px-3 py-1.5 cursor-pointer hover:bg-void-700/40">
               <input type="checkbox" checked={!isExcluded} onChange={() => toggle(g.key)} className="accent-lime-400" />
               <span className={`flex-1 min-w-0 truncate font-display text-[13px] ${isExcluded ? 'text-steel-600 line-through' : 'text-steel-300'}`}>
+                {multiProvider && <span className="font-mono text-[10px] text-steel-500 mr-2">{g.provider}</span>}
                 {g.name}
               </span>
               <span className="font-mono text-[10px] text-steel-500">{isExcluded ? 'excluded' : `${g.count} indexed`}</span>
@@ -407,6 +463,24 @@ export default function Settings() {
       .then(data => setUpdateInfo(data))
       .catch(() => {})
       .finally(() => setUpdateLoading(false))
+  }
+
+  const addProvider = () => {
+    setCfg(prev => ({
+      ...prev,
+      extra_providers: [...(prev.extra_providers || []), { name: '', url: '', username: '', password: '' }],
+    }))
+  }
+
+  const removeProvider = idx => {
+    setCfg(prev => ({ ...prev, extra_providers: prev.extra_providers.filter((_, i) => i !== idx) }))
+  }
+
+  const setProvider = (idx, field, value) => {
+    setCfg(prev => ({
+      ...prev,
+      extra_providers: prev.extra_providers.map((p, i) => (i === idx ? { ...p, [field]: value } : p)),
+    }))
   }
 
   const addArrInstance = () => {
@@ -684,6 +758,13 @@ export default function Settings() {
         {/* Xtream */}
         <div className="animate-fade-up animate-fade-up-1">
           <Section title="Xtream Provider">
+            <Field label="Name" hint="How this provider is shown in VODarr when you add extra providers below.">
+              <TextInput
+                value={cfg.xtream.name || ''}
+                onChange={v => set('xtream.name', v)}
+                placeholder="Primary"
+              />
+            </Field>
             <Field label="Server URL" hint="Base URL of your Xtream provider, no trailing slash">
               <TextInput
                 value={cfg.xtream.url}
@@ -706,6 +787,33 @@ export default function Settings() {
               success={xtreamTest.success}
               error={xtreamTest.error}
             />
+          </Section>
+        </div>
+
+        {/* Extra providers */}
+        <div className="animate-fade-up animate-fade-up-1">
+          <Section title="Extra Providers">
+            <p className="font-mono text-[11px] text-steel-500">
+              Further Xtream accounts, synced alongside the one above, so titles one provider lacks can come from
+              another. Their releases carry the provider's name in the release group (e.g. WEB-DL-ProviderBSeries),
+              so you can tell copies apart and rank them with custom formats. Keep a provider's name once it is in use:
+              its titles and .strm files are identified by it. Save and restart after changes.
+            </p>
+            {(cfg.extra_providers || []).map((p, idx) => (
+              <ExtraProvider
+                key={idx}
+                provider={p}
+                onChange={(field, value) => setProvider(idx, field, value)}
+                onRemove={() => removeProvider(idx)}
+              />
+            ))}
+            <button
+              type="button"
+              onClick={addProvider}
+              className="w-full py-2 border border-dashed border-void-500 text-steel-500 rounded font-mono text-[12px] hover:border-void-400 hover:text-steel-400 transition-all"
+            >
+              + Add Provider
+            </button>
           </Section>
         </div>
 

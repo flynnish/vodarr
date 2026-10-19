@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -63,7 +64,7 @@ type Handler struct {
 
 	// strmURL, when set, is the stream proxy's URL for a stream; the .strm
 	// rewrite then writes it instead of the provider URL.
-	strmURL func(kind string, id int, ext string) string
+	strmURL func(provider, kind string, id int, ext string) string
 }
 
 // SetStreamProxy serves the stream proxy at /play/ (public: media servers
@@ -71,7 +72,7 @@ type Handler struct {
 // is non-nil, makes the .strm rewrite write proxy URLs. The route is served
 // even with the proxy off, so proxied .strm files keep playing until they
 // are rewritten. Call before serving.
-func (h *Handler) SetStreamProxy(proxy http.Handler, strmURL func(kind string, id int, ext string) string) {
+func (h *Handler) SetStreamProxy(proxy http.Handler, strmURL func(provider, kind string, id int, ext string) string) {
 	h.mux.Handle("/play/", proxy)
 	h.strmURL = strmURL
 }
@@ -247,6 +248,8 @@ func matchesStatusFilter(item *index.Item, filter string) bool {
 // configResponse is the shape returned by GET /api/config.
 type configResponse struct {
 	Xtream  xtreamConfigResp  `json:"xtream"`
+	// ExtraProviders are further Xtream accounts (passwords masked).
+	ExtraProviders []providerConfigResp `json:"extra_providers"`
 	TMDB    tmdbConfigResp    `json:"tmdb"`
 	Output  outputConfigResp  `json:"output"`
 	Sync    syncConfigResp    `json:"sync"`
@@ -272,6 +275,14 @@ type arrInstanceResp struct {
 }
 
 type xtreamConfigResp struct {
+	Name     string `json:"name"`
+	URL      string `json:"url"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type providerConfigResp struct {
+	Name     string `json:"name"`
 	URL      string `json:"url"`
 	Username string `json:"username"`
 	Password string `json:"password"`
@@ -319,10 +330,12 @@ func (h *Handler) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 
 	resp := configResponse{
 		Xtream: xtreamConfigResp{
+			Name:     cfg.Xtream.Name,
 			URL:      cfg.Xtream.URL,
 			Username: cfg.Xtream.Username,
 			Password: maskIfSet(cfg.Xtream.Password),
 		},
+		ExtraProviders: extraProvidersResp(cfg.ExtraProviders),
 		TMDB: tmdbConfigResp{
 			APIKey:     maskIfSet(cfg.TMDB.APIKey),
 			TVDBAPIKey: maskIfSet(cfg.TMDB.TVDBAPIKey),
@@ -375,10 +388,13 @@ func (h *Handler) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 // putConfigRequest is the shape of the PUT /api/config body.
 type putConfigRequest struct {
 	Xtream struct {
+		Name     string `json:"name"`
 		URL      string `json:"url"`
 		Username string `json:"username"`
 		Password string `json:"password"`
 	} `json:"xtream"`
+	// nil when an older UI does not send it: extra providers are kept.
+	ExtraProviders *[]providerConfigResp `json:"extra_providers"`
 	TMDB struct {
 		APIKey     string `json:"api_key"`
 		TVDBAPIKey string `json:"tvdb_api_key"`
@@ -436,9 +452,26 @@ func (h *Handler) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	// Build new config, resolving sentinel passwords
 	newCfg := *h.cfg // shallow copy preserves ServerConfig sensitive fields
 
+	newCfg.Xtream.Name = strings.TrimSpace(req.Xtream.Name)
 	newCfg.Xtream.URL = req.Xtream.URL
 	newCfg.Xtream.Username = req.Xtream.Username
 	newCfg.Xtream.Password = resolveSentinel(req.Xtream.Password, h.cfg.Xtream.Password)
+	if req.ExtraProviders != nil {
+		// A masked password keeps the stored one of the provider with that name.
+		stored := make(map[string]string)
+		for _, p := range h.cfg.ExtraProviders {
+			stored[config.ProviderID(p.Name)] = p.Password
+		}
+		newCfg.ExtraProviders = nil
+		for _, p := range *req.ExtraProviders {
+			newCfg.ExtraProviders = append(newCfg.ExtraProviders, config.ProviderConfig{
+				Name:     strings.TrimSpace(p.Name),
+				URL:      strings.TrimSpace(p.URL),
+				Username: p.Username,
+				Password: resolveSentinel(p.Password, stored[config.ProviderID(p.Name)]),
+			})
+		}
+	}
 	newCfg.TMDB.APIKey = resolveSentinel(req.TMDB.APIKey, h.cfg.TMDB.APIKey)
 	newCfg.TMDB.TVDBAPIKey = resolveSentinel(req.TMDB.TVDBAPIKey, h.cfg.TMDB.TVDBAPIKey)
 	newCfg.Output.Path = req.Output.Path
@@ -541,6 +574,9 @@ type testXtreamRequest struct {
 	URL      string `json:"url"`
 	Username string `json:"username"`
 	Password string `json:"password"`
+	// Provider names an extra provider, whose stored password a masked
+	// password stands for; empty for the primary provider.
+	Provider string `json:"provider"`
 }
 
 func (h *Handler) handleTestXtream(w http.ResponseWriter, r *http.Request) {
@@ -553,6 +589,14 @@ func (h *Handler) handleTestXtream(w http.ResponseWriter, r *http.Request) {
 
 	h.cfgMu.RLock()
 	storedPassword := h.cfg.Xtream.Password
+	if req.Provider != "" {
+		storedPassword = ""
+		for _, p := range h.cfg.ExtraProviders {
+			if config.ProviderID(p.Name) == config.ProviderID(req.Provider) {
+				storedPassword = p.Password
+			}
+		}
+	}
 	h.cfgMu.RUnlock()
 
 	password := resolveSentinel(req.Password, storedPassword)
@@ -1101,6 +1145,27 @@ func fixDownloadClient(do func(method, url string, body []byte) (*http.Response,
 	}
 	slog.Info("arr setup: updated existing VODarr download client", "changed", changed)
 	return map[string]interface{}{"success": true, "updated": changed}
+}
+
+// providerOf finds which provider a provider stream URL belongs to: the one
+// with that server and account, else the only one with that server (its
+// login changed). ok is false when none or several match.
+func providerOf(providers []config.Provider, host, user string) (id string, ok bool) {
+	var sameHost []string
+	for _, p := range providers {
+		u, err := neturl.Parse(p.URL)
+		if err != nil || !strings.EqualFold(u.Host, host) {
+			continue
+		}
+		if p.Username == user {
+			return p.ID, true
+		}
+		sameHost = append(sameHost, p.ID)
+	}
+	if len(sameHost) == 1 {
+		return sameHost[0], true
+	}
+	return "", false
 }
 
 // arrCategoryField returns the qBittorrent download client field an arr app
@@ -1665,6 +1730,15 @@ func maskIfSet(s string) string {
 }
 
 // resolveSentinel returns stored if incoming is the sentinel or empty.
+// extraProvidersResp lists the extra providers with masked passwords.
+func extraProvidersResp(ps []config.ProviderConfig) []providerConfigResp {
+	out := make([]providerConfigResp, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, providerConfigResp{Name: p.Name, URL: p.URL, Username: p.Username, Password: maskIfSet(p.Password)})
+	}
+	return out
+}
+
 func resolveSentinel(incoming, stored string) string {
 	if incoming == passwordSentinel || incoming == "" {
 		return stored
@@ -1684,23 +1758,36 @@ func (h *Handler) handleStrmRefresh(w http.ResponseWriter, r *http.Request) {
 	defer h.refreshing.Store(false)
 
 	h.cfgMu.RLock()
-	xc := xtream.NewClient(h.cfg.Xtream.URL, h.cfg.Xtream.Username, h.cfg.Xtream.Password)
+	providers := h.cfg.Providers()
 	outputPath := h.cfg.Output.Path
 	instances := h.cfg.Arr.Instances
 	h.cfgMu.RUnlock()
 
-	buildURL := func(streamType, streamIDStr, ext string) (string, error) {
-		id, err := strconv.Atoi(streamIDStr)
+	clients := make(map[string]*xtream.Client, len(providers))
+	for _, p := range providers {
+		clients[p.ID] = xtream.NewClient(p.URL, p.Username, p.Password)
+	}
+
+	buildURL := func(ref strm.StreamRef) (string, error) {
+		id, err := strconv.Atoi(ref.ID)
 		if err != nil {
-			return "", fmt.Errorf("invalid stream id %q: %w", streamIDStr, err)
+			return "", fmt.Errorf("invalid stream id %q: %w", ref.ID, err)
 		}
-		if streamType != "movie" && streamType != "series" {
-			return "", fmt.Errorf("unknown stream type %q", streamType)
+		if ref.Kind != "movie" && ref.Kind != "series" {
+			return "", fmt.Errorf("unknown stream type %q", ref.Kind)
+		}
+		provider, ok := ref.Provider, ref.Proxied
+		if !ok {
+			provider, ok = providerOf(providers, ref.Host, ref.User)
+		}
+		if !ok || clients[provider] == nil {
+			slog.Warn("strm refresh: stream of an unknown provider, leaving it", "host", ref.Host, "provider", ref.Provider)
+			return "", nil
 		}
 		if h.strmURL != nil {
-			return h.strmURL(streamType, id, ext), nil
+			return h.strmURL(provider, ref.Kind, id, ref.Ext), nil
 		}
-		return xc.BuildStreamURL(streamType, id, ext), nil
+		return clients[provider].BuildStreamURL(ref.Kind, id, ref.Ext), nil
 	}
 
 	// VODarr's output folder, plus the Sonarr/Radarr library folders the
@@ -1719,7 +1806,7 @@ func (h *Handler) handleStrmRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	cancel()
 
-	n, err := strm.RefreshURLsIn(roots, buildURL)
+	n, err := strm.RefreshStreams(roots, buildURL)
 	if err != nil {
 		slog.Warn("strm refresh completed with errors", "rewritten", n, "error", err)
 	} else {
