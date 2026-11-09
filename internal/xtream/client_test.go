@@ -312,3 +312,30 @@ func TestSeriesInfoMixedVideoTypes(t *testing.T) {
 			eps[1].Info.Duration, "00:46:00")
 	}
 }
+
+func TestEpisodeMapAcceptsArrays(t *testing.T) {
+	cases := []struct {
+		name, body string
+		want       map[string]int
+	}{
+		{"keyed by season", `{"1":[{"id":"1","season":1}],"2":[{"id":"2","season":2}]}`, map[string]int{"1": 1, "2": 1}},
+		{"array of seasons", `[[{"id":"1","season":1},{"id":"2","season":1}],[{"id":"3","season":2}]]`, map[string]int{"1": 2, "2": 1}},
+		{"flat array", `[{"id":"1","season":1},{"id":"2","season":3}]`, map[string]int{"1": 1, "3": 1}},
+		{"empty array", `[]`, map[string]int{}},
+	}
+	for _, c := range cases {
+		var m EpisodeMap
+		if err := json.Unmarshal([]byte(c.body), &m); err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if len(m) != len(c.want) {
+			t.Errorf("%s: seasons %v, want %v", c.name, m, c.want)
+		}
+		for season, n := range c.want {
+			if len(m[season]) != n {
+				t.Errorf("%s: season %s has %d episodes, want %d", c.name, season, len(m[season]), n)
+			}
+		}
+	}
+}

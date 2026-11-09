@@ -33,6 +33,25 @@ type SeriesEntry struct {
 	EpisodeCount int                 `json:"episode_count"`
 	Checksum     string              `json:"checksum"`
 	Episodes     []index.EpisodeItem `json:"episodes"`
+	// FetchedAt is when the episode list was last fetched from the provider.
+	// Zero in snapshots written before it existed, which makes them stale.
+	FetchedAt time.Time `json:"fetched_at,omitempty"`
+}
+
+// seriesRefreshAge is how long a series' episode list is reused before it is
+// fetched again. Providers often add episodes without touching the series'
+// last_modified, so the checksum alone would keep a stale list for ever.
+const seriesRefreshAge = 24 * time.Hour
+
+// seriesStale reports whether a series' cached episode list is due a refetch.
+// The limit is spread over a further day by ID, so a catalog fetched in one
+// go does not all come due in the same sync.
+func seriesStale(id int, fetchedAt, now time.Time) bool {
+	if id < 0 {
+		id = -id
+	}
+	limit := seriesRefreshAge + time.Duration(id%24)*time.Hour
+	return now.Sub(fetchedAt) >= limit
 }
 
 // MovieChecksum returns an FNV-1a fingerprint of a movie's key fields.
@@ -49,6 +68,15 @@ func SeriesChecksum(name, lastModified string, episodeCount int) string {
 	h := fnv.New64a()
 	fmt.Fprintf(h, "%s\x00%s\x00%d", name, lastModified, episodeCount)
 	return fmt.Sprintf("%016x", h.Sum64())
+}
+
+// entry returns the snapshot's entry for a series; s may be nil.
+func (s *Snapshot) entry(id int) (SeriesEntry, bool) {
+	if s == nil {
+		return SeriesEntry{}, false
+	}
+	e, ok := s.Series[id]
+	return e, ok
 }
 
 // SnapshotPath returns the canonical path for the snapshot file given the

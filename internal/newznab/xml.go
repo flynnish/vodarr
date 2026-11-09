@@ -298,12 +298,29 @@ func stripIPTVPrefix(s string) string {
 // Radarr/Sonarr parse them for quality profile matching.
 func sanitizeNameForTitle(name string) string {
 	s := strings.TrimSpace(iptvPrefixRe.ReplaceAllString(name, ""))
-	s = yearDashRe.ReplaceAllString(s, "")
-	s = yearBracketRe.ReplaceAllString(s, "")
-	s = yearParenRe.ReplaceAllString(s, "")
+	s = stripTrailingYear(s)
 	s = nlGespokenRe.ReplaceAllString(s, "DUTCH")
 	// Normalise any double spaces left after stripping.
 	return strings.TrimSpace(strings.Join(strings.Fields(s), " "))
+}
+
+// langTagRe matches a bare language/country tag such as "EN" or "NL".
+var langTagRe = regexp.MustCompile(`^[A-Z]{2,3}$`)
+
+// stripTrailingYear removes one trailing year ("- 2021", "[2021]" or
+// "(2021)"), unless the number is the title itself: "1985 (2023)" keeps
+// "1985", and "EN - 1923" is left alone.
+func stripTrailingYear(s string) string {
+	for _, re := range []*regexp.Regexp{yearDashRe, yearBracketRe, yearParenRe} {
+		if loc := re.FindStringIndex(s); loc != nil {
+			rest := strings.TrimSpace(s[:loc[0]])
+			if langTagRe.MatchString(rest) {
+				return s
+			}
+			return rest
+		}
+	}
+	return s
 }
 
 // RSS is the root RSS 2.0 document.

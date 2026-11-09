@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 
 function useContent(type) {
   const [data, setData] = useState(null)
@@ -423,9 +423,44 @@ function MatchDialog({ item, onClose, onUpdated }) {
   const minSeason = providerSeasons.length ? Math.min(...providerSeasons) : null
   const maxSeason = providerSeasons.length ? Math.max(...providerSeasons) : null
 
+  // What the provider itself says about the item, fetched live: its own
+  // plot, cast and poster, and for a series the episodes it carries.
+  const [details, setDetails] = useState(null)
+  const [detailsError, setDetailsError] = useState(null)
+  const [showEpisodes, setShowEpisodes] = useState(false)
+  useEffect(() => {
+    const params = new URLSearchParams({ type: providerType, xtream_id: item.XtreamID, provider: item.provider || '' })
+    fetch(`/api/match/details?${params}`)
+      .then(async res => {
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+        setDetails(data)
+      })
+      .catch(err => setDetailsError(err.message))
+  }, [providerType, item.XtreamID, item.provider])
+  const info = details || {}
+  const poster = info.poster || item.Poster
+  const plot = info.plot || item.Plot
+  const detailEpisodes = details?.episodes || []
+  const detailSeasons = [...new Set(detailEpisodes.map(ep => ep.season))]
+
+  // A TMDB link (themoviedb.org/tv/126553-normal-people) pasted into the
+  // search or ID box fills in the ID and the type it belongs to.
+  const takeTmdbLink = value => {
+    const m = value.match(/themoviedb\.org\/(movie|tv)\/(\d+)/)
+    if (!m) return false
+    setTarget(m[1] === 'tv' ? 'series' : 'movie')
+    setTmdbId(m[2])
+    return true
+  }
+
+  // Close on a backdrop click only when the press started there too, so a
+  // text selection dragged out of the dialog does not close it.
+  const pressedBackdrop = useRef(false)
+
   const search = async e => {
     e?.preventDefault()
-    if (!q.trim()) return
+    if (!q.trim() || /themoviedb\.org\//.test(q)) return
     setSearching(true)
     setError(null)
     try {
@@ -481,7 +516,8 @@ function MatchDialog({ item, onClose, onUpdated }) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onClick={e => { if (e.target === e.currentTarget && !busy) onClose() }}
+      onMouseDown={e => { pressedBackdrop.current = e.target === e.currentTarget }}
+      onClick={e => { if (e.target === e.currentTarget && pressedBackdrop.current && !busy) onClose() }}
     >
       <div className="w-full max-w-2xl max-h-[90vh] flex flex-col bg-void-800 border border-void-600 rounded-lg overflow-hidden">
         <div className="px-5 py-3 border-b border-void-600 bg-void-700/40 flex items-start justify-between gap-4">
@@ -496,6 +532,49 @@ function MatchDialog({ item, onClose, onUpdated }) {
             </p>
           </div>
           <button type="button" onClick={onClose} disabled={busy} aria-label="Close" className="font-mono text-[12px] text-steel-500 hover:text-steel-300">✕</button>
+        </div>
+
+        <div className="px-5 py-3 border-b border-void-600 max-h-[35vh] overflow-y-auto">
+          <p className="font-mono text-[10px] text-steel-500 uppercase tracking-widest mb-2">
+            From the provider{item.provider_name ? ` (${item.provider_name})` : ''}
+            {!details && !detailsError && ' · loading…'}
+          </p>
+          <div className="flex gap-3 items-start">
+            {poster
+              ? <img src={poster} alt="" className="w-16 h-24 rounded object-cover flex-none bg-void-700" />
+              : <div className="w-16 h-24 rounded flex-none bg-void-700" />}
+            <div className="flex-1 min-w-0 space-y-1 font-mono text-[11px] text-steel-400">
+              {info.name && info.name !== item.Name && <p className="text-steel-300">{info.name}</p>}
+              {plot && <p className="text-steel-300 whitespace-pre-line">{plot}</p>}
+              {info.cast && <p><span className="text-steel-500">Cast</span> {info.cast}</p>}
+              {info.director && <p><span className="text-steel-500">Director</span> {info.director}</p>}
+              {(info.genre || item.Genre) && <p><span className="text-steel-500">Genre</span> {info.genre || item.Genre}</p>}
+              {(info.release_date || item.ReleaseDate) && (
+                <p><span className="text-steel-500">Released</span> {info.release_date || item.ReleaseDate}</p>
+              )}
+              {info.tmdb_id > 0 && <p><span className="text-steel-500">Provider's TMDB tag</span> {info.tmdb_id}</p>}
+              {detailsError && <p className="text-amber-400/80">Could not load the provider's details: {detailsError}</p>}
+              {details && !plot && !info.cast && !info.director && <p className="text-steel-500">The provider gives no description.</p>}
+            </div>
+          </div>
+          {providerType === 'series' && details && (
+            <div className="mt-2 font-mono text-[11px]">
+              <button type="button" onClick={() => setShowEpisodes(s => !s)} className="text-steel-400 hover:text-steel-300">
+                {showEpisodes ? '▾' : '▸'} {detailEpisodes.length} episode{detailEpisodes.length === 1 ? '' : 's'}
+                {detailSeasons.length > 0 && ` in season${detailSeasons.length === 1 ? '' : 's'} ${detailSeasons.join(', ')}`}
+              </button>
+              {showEpisodes && (
+                <ul className="mt-1 space-y-0.5">
+                  {detailEpisodes.map(ep => (
+                    <li key={`${ep.season}-${ep.episode}-${ep.title}`} className="text-steel-400" title={ep.plot || ''}>
+                      <span className="text-steel-500">S{String(ep.season).padStart(2, '0')}E{String(ep.episode).padStart(2, '0')}</span>
+                      {ep.title ? ` ${ep.title}` : ''}{ep.aired ? <span className="text-steel-500"> · {ep.aired}</span> : ''}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="px-5 py-3 border-b border-void-600 space-y-2">
@@ -581,7 +660,12 @@ function MatchDialog({ item, onClose, onUpdated }) {
         </div>
 
         <form onSubmit={search} className="px-5 py-3 flex gap-2 border-b border-void-600">
-          <input value={q} onChange={e => setQ(e.target.value)} placeholder={target === 'movie' ? 'Film title' : 'Series title'} className={`flex-1 min-w-0 ${input}`} />
+          <input
+            value={q}
+            onChange={e => { setQ(e.target.value); takeTmdbLink(e.target.value) }}
+            placeholder={`${target === 'movie' ? 'Film' : 'Series'} title, or paste a TMDB link`}
+            className={`flex-1 min-w-0 ${input}`}
+          />
           <input
             value={year}
             onChange={e => setYear(e.target.value.replace(/\D/g, '').slice(0, 4))}
@@ -596,6 +680,12 @@ function MatchDialog({ item, onClose, onUpdated }) {
         <div className="flex-1 overflow-y-auto divide-y divide-void-600/50">
           {results === null ? (
             <p className="px-5 py-6 font-mono text-[11px] text-steel-500">{searching ? 'Searching…' : ''}</p>
+          ) : /themoviedb\.org\//.test(q) ? (
+            <p className="px-5 py-6 font-mono text-[11px] text-steel-500">
+              {tmdbId
+                ? <>TMDB {target === 'movie' ? 'film' : 'TV'} {tmdbId} from the link is filled in below. Press “Use ID{target === 'series' ? 's' : ''}”.</>
+                : 'That TMDB link has no film or TV ID in it.'}
+            </p>
           ) : results.length === 0 ? (
             <p className="px-5 py-6 font-mono text-[11px] text-steel-500">No TMDB results. Try another title, or enter an ID below.</p>
           ) : results.map(r => {
@@ -633,9 +723,9 @@ function MatchDialog({ item, onClose, onUpdated }) {
           <div className="flex flex-wrap items-center gap-2">
             <input
               value={tmdbId}
-              onChange={e => setTmdbId(e.target.value.replace(/\D/g, ''))}
-              placeholder={target === 'movie' ? 'TMDB film ID' : 'TMDB TV ID'}
-              className={`w-32 ${input}`}
+              onChange={e => { if (!takeTmdbLink(e.target.value)) setTmdbId(e.target.value.replace(/\D/g, '')) }}
+              placeholder={target === 'movie' ? 'TMDB film ID / link' : 'TMDB TV ID / link'}
+              className={`w-36 ${input}`}
             />
             {target === 'series' && (
               <input

@@ -151,6 +151,7 @@ func (h *Handler) registerRoutes(staticFS fs.FS) {
 	h.mux.HandleFunc("GET /api/categories", auth(h.handleGetCategories))
 	h.mux.HandleFunc("PUT /api/categories", auth(h.handlePutCategories))
 	h.mux.HandleFunc("GET /api/match/search", auth(h.handleMatchSearch))
+	h.mux.HandleFunc("GET /api/match/details", auth(h.handleMatchDetails))
 	h.mux.HandleFunc("PUT /api/match", auth(h.handlePutMatch))
 	h.mux.HandleFunc("DELETE /api/match", auth(h.handleDeleteMatch))
 

@@ -99,6 +99,7 @@ type VODInfoDetail struct {
 	Rating      FlexFloat        `json:"rating"`
 	Duration    string           `json:"duration"`
 	Backdrop    FlexStringSlice  `json:"backdrop_path"`
+	MovieImage  string           `json:"movie_image"`
 	Bitrate     int              `json:"bitrate"`
 	// Deliberately NOT json.RawMessage, unlike EpisodeInfo.Video: this one is read,
 	// at EstimateMovieFileSize (Video.Tags["DURATION"]). If a provider ever sends a
@@ -133,7 +134,37 @@ type Series struct {
 type SeriesInfo struct {
 	Info     SeriesInfoDetail      `json:"info"`
 	Seasons  json.RawMessage       `json:"seasons"`  // provider may return [] or {} — field unused
-	Episodes map[string][]Episode  `json:"episodes"`
+	Episodes EpisodeMap           `json:"episodes"`
+}
+
+// EpisodeMap holds a series' episodes keyed by season number. Most providers
+// send an object keyed by season; some send an array of per-season arrays, or
+// one flat array. Those are grouped by each episode's own season.
+type EpisodeMap map[string][]Episode
+
+func (m *EpisodeMap) UnmarshalJSON(data []byte) error {
+	var byKey map[string][]Episode
+	if err := json.Unmarshal(data, &byKey); err == nil {
+		*m = byKey
+		return nil
+	}
+	var seasons [][]Episode
+	if err := json.Unmarshal(data, &seasons); err != nil {
+		var flat []Episode
+		if err2 := json.Unmarshal(data, &flat); err2 != nil {
+			return err
+		}
+		seasons = [][]Episode{flat}
+	}
+	out := EpisodeMap{}
+	for _, eps := range seasons {
+		for _, ep := range eps {
+			key := strconv.Itoa(ep.Season.Int())
+			out[key] = append(out[key], ep)
+		}
+	}
+	*m = out
+	return nil
 }
 
 type SeriesInfoDetail struct {

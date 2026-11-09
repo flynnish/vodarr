@@ -48,19 +48,31 @@ var dolbyRe = regexp.MustCompile(`(?i)[\[(]DOLBY[^\])\[(]*[\])]|\bDOLBY\b`)
 // nlGespokenRe matches Dutch audio markers in stream names, e.g. "(NL GESPROKEN)" or "[NL Gesproken]".
 var nlGespokenRe = regexp.MustCompile(`(?i)[(\[]NL\s+GESPROKEN[)\]]`)
 
+// langTagRe matches a bare language/country tag such as "EN" or "NL".
+var langTagRe = regexp.MustCompile(`^[A-Z]{2,3}$`)
+
+// splitTrailingYear splits one trailing 4-digit year (parens, dash, or
+// bracket) off a name. Only one: in "1985 (2023)" the title is "1985". And
+// not when only a language tag is left, as in "EN - 1923", where the number is
+// the title. Returns the name unchanged and "" when there is no such year.
+func splitTrailingYear(name string) (rest, year string) {
+	for _, re := range []*regexp.Regexp{yearInParensRe, yearDashRe, yearBracketRe} {
+		if loc := re.FindStringSubmatchIndex(name); loc != nil {
+			rest = strings.TrimSpace(name[:loc[0]])
+			if langTagRe.MatchString(rest) {
+				return name, ""
+			}
+			return rest, name[loc[2]:loc[3]]
+		}
+	}
+	return name, ""
+}
+
 // extractTrailingYear returns the 4-digit year embedded at the end of a name
 // (parens, dash, or bracket), or "" if none is found.
 func extractTrailingYear(name string) string {
-	if m := yearInParensRe.FindStringSubmatch(name); m != nil {
-		return m[1]
-	}
-	if m := yearDashRe.FindStringSubmatch(name); m != nil {
-		return m[1]
-	}
-	if m := yearBracketRe.FindStringSubmatch(name); m != nil {
-		return m[1]
-	}
-	return ""
+	_, year := splitTrailingYear(name)
+	return year
 }
 
 // extractNameYear extracts a trailing 4-digit year from a raw IPTV stream
@@ -93,9 +105,7 @@ func cleanTitleForSearch(name string, patterns []*regexp.Regexp) string {
 	title = fourKRe.ReplaceAllString(title, "")
 	title = dolbyRe.ReplaceAllString(title, "")
 	title = nlGespokenRe.ReplaceAllString(title, "")
-	title = yearInParensRe.ReplaceAllString(title, "")
-	title = yearDashRe.ReplaceAllString(title, "")
-	title = yearBracketRe.ReplaceAllString(title, "")
+	title, _ = splitTrailingYear(strings.TrimSpace(title))
 	for _, re := range patterns {
 		title = re.ReplaceAllString(title, "")
 	}
@@ -721,17 +731,20 @@ func (s *Scheduler) fetchProvider(ctx context.Context, src source, excludedCats,
 		series xtream.Series
 	}
 	skippedItems := make(map[int]*index.Item, len(series))
+	fetchedAt := make(map[int]time.Time, len(series))
 	var toFetch []xtream.Series
+	now := time.Now()
 
 	for _, sr := range series {
 		id := sr.SeriesID.Int()
 		if prevSnap != nil {
 			if prev, ok := prevSnap.Series[id]; ok {
 				cs := SeriesChecksum(sr.Name, sr.LastModified, prev.EpisodeCount)
-				if cs == prev.Checksum && len(prev.Episodes) > 0 {
+				if cs == prev.Checksum && len(prev.Episodes) > 0 && !seriesStale(id, prev.FetchedAt, now) {
 					item := buildSeriesItem(sr)
 					item.Episodes = prev.Episodes
 					skippedItems[id] = item
+					fetchedAt[id] = prev.FetchedAt
 					continue
 				}
 			}
@@ -773,7 +786,8 @@ func (s *Scheduler) fetchProvider(ctx context.Context, src source, excludedCats,
 				sr := work.series
 				item := buildSeriesItem(sr)
 
-				if info, err := xc.GetSeriesInfo(ctx, sr.SeriesID.Int()); err == nil {
+				info, err := xc.GetSeriesInfo(ctx, sr.SeriesID.Int())
+				if err == nil {
 					for seasonStr, eps := range info.Episodes {
 						season, _ := strconv.Atoi(seasonStr)
 						for _, ep := range eps {
@@ -805,6 +819,14 @@ func (s *Scheduler) fetchProvider(ctx context.Context, src source, excludedCats,
 
 				fetchMu.Lock()
 				fetchedItems[sr.SeriesID.Int()] = item
+				if err == nil {
+					fetchedAt[sr.SeriesID.Int()] = now
+				} else if prev, ok := prevSnap.entry(sr.SeriesID.Int()); ok && len(prev.Episodes) > 0 {
+					// A failed refetch keeps the last good list rather than
+					// dropping every episode; its old fetch time retries it next sync.
+					item.Episodes = prev.Episodes
+					fetchedAt[sr.SeriesID.Int()] = prev.FetchedAt
+				}
 				fetchMu.Unlock()
 			}
 		}()
@@ -859,6 +881,7 @@ func (s *Scheduler) fetchProvider(ctx context.Context, src source, excludedCats,
 			EpisodeCount: len(eps),
 			Checksum:     SeriesChecksum(sr.Name, lm, len(eps)),
 			Episodes:     eps,
+			FetchedAt:    fetchedAt[id],
 		}
 	}
 	if err := SaveSnapshot(snapPath, newSnap); err != nil {

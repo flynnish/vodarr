@@ -215,6 +215,99 @@ func (h *Handler) handleMatchSearch(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, map[string]interface{}{"results": out})
 }
 
+type providerDetails struct {
+	Name        string            `json:"name"`
+	Plot        string            `json:"plot,omitempty"`
+	Cast        string            `json:"cast,omitempty"`
+	Director    string            `json:"director,omitempty"`
+	Genre       string            `json:"genre,omitempty"`
+	ReleaseDate string            `json:"release_date,omitempty"`
+	Poster      string            `json:"poster,omitempty"`
+	TMDBId      int               `json:"tmdb_id,omitempty"`
+	Episodes    []providerEpisode `json:"episodes,omitempty"`
+}
+
+type providerEpisode struct {
+	Season  int    `json:"season"`
+	Episode int    `json:"episode"`
+	Title   string `json:"title,omitempty"`
+	Plot    string `json:"plot,omitempty"`
+	Aired   string `json:"aired,omitempty"`
+}
+
+// handleMatchDetails fetches what the provider itself says about an item
+// (plot, cast, poster and, for a series, its episodes), live, to help decide
+// what it really is when fixing its match.
+// Query: type=movie|series (the provider's type), xtream_id, provider.
+func (h *Handler) handleMatchDetails(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	id, _ := strconv.Atoi(q.Get("xtream_id"))
+	mt, ok := parseMediaType(q.Get("type"))
+	if !ok || id <= 0 {
+		h.writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "type and xtream_id are required"})
+		return
+	}
+	h.cfgMu.RLock()
+	var xc *xtream.Client
+	for _, p := range h.cfg.Providers() {
+		if p.ID == q.Get("provider") {
+			xc = xtream.NewClient(p.URL, p.Username, p.Password)
+		}
+	}
+	h.cfgMu.RUnlock()
+	if xc == nil {
+		h.writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "unknown provider"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	var out providerDetails
+	if mt == index.TypeMovie {
+		info, err := xc.GetVODInfo(ctx, id)
+		if err != nil {
+			h.writeJSONStatus(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		d := info.Info
+		out = providerDetails{Name: firstNonEmpty(d.Name, info.MovieData.Name), Plot: d.Plot, Cast: d.Cast,
+			Director: d.Director, Genre: d.Genre, ReleaseDate: d.ReleaseDate, Poster: d.MovieImage, TMDBId: d.TMDBId.Int()}
+	} else {
+		info, err := xc.GetSeriesInfo(ctx, id)
+		if err != nil {
+			h.writeJSONStatus(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		d := info.Info
+		out = providerDetails{Name: d.Name, Plot: d.Plot, Cast: d.Cast, Director: d.Director, Genre: d.Genre,
+			ReleaseDate: d.ReleaseDate, Poster: d.Cover, TMDBId: d.TMDBId.Int()}
+		for key, eps := range info.Episodes {
+			season, _ := strconv.Atoi(key)
+			for _, ep := range eps {
+				out.Episodes = append(out.Episodes, providerEpisode{Season: season, Episode: ep.EpisodeNum.Int(),
+					Title: ep.Title, Plot: ep.Info.Plot, Aired: ep.Info.ReleaseDate})
+			}
+		}
+		sort.Slice(out.Episodes, func(i, j int) bool {
+			a, b := out.Episodes[i], out.Episodes[j]
+			if a.Season != b.Season {
+				return a.Season < b.Season
+			}
+			return a.Episode < b.Episode
+		})
+	}
+	h.writeJSON(w, out)
+}
+
+func firstNonEmpty(s ...string) string {
+	for _, v := range s {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 type matchRequest struct {
 	Type     string `json:"type"` // provider type, "movie" or "series": identifies the item
 	XtreamID int    `json:"xtream_id"`

@@ -152,3 +152,44 @@ func TestProviderOf(t *testing.T) {
 		}
 	}
 }
+
+func TestMatchDetailsFromProvider(t *testing.T) {
+	prov := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "get_series_info":
+			w.Write([]byte(`{"info":{"name":"1923","plot":"The Duttons","cast":"Harrison Ford, Helen Mirren","cover":"http://img/1923.jpg","tmdb_id":"157744"},
+				"episodes":{"2":[{"id":"9","episode_num":1,"title":"S2 opener"}],"1":[{"id":"2","episode_num":2,"title":"B"},{"id":"1","episode_num":1,"title":"A","info":{"plot":"First"}}]}}`))
+		case "get_vod_info":
+			w.Write([]byte(`{"info":{"plot":"A film","movie_image":"http://img/f.jpg"},"movie_data":{"stream_id":5,"name":"1985"}}`))
+		default:
+			http.Error(w, "unknown", http.StatusBadRequest)
+		}
+	}))
+	defer prov.Close()
+	cfg := minimalCfg()
+	cfg.Xtream.URL = prov.URL
+	h := makeHandler(cfg, "")
+
+	get := func(query string) (int, providerDetails) {
+		w := httptest.NewRecorder()
+		h.handleMatchDetails(w, httptest.NewRequest("GET", "/api/match/details?"+query, nil))
+		var d providerDetails
+		json.Unmarshal(w.Body.Bytes(), &d)
+		return w.Code, d
+	}
+
+	code, d := get("type=series&xtream_id=7")
+	if code != http.StatusOK || d.Cast != "Harrison Ford, Helen Mirren" || d.Poster != "http://img/1923.jpg" || d.TMDBId != 157744 {
+		t.Fatalf("series details: %d %+v", code, d)
+	}
+	if len(d.Episodes) != 3 || d.Episodes[0].Title != "A" || d.Episodes[0].Plot != "First" || d.Episodes[2].Season != 2 {
+		t.Errorf("episodes not in season/episode order: %+v", d.Episodes)
+	}
+
+	if code, d = get("type=movie&xtream_id=5"); code != http.StatusOK || d.Name != "1985" || d.Poster != "http://img/f.jpg" {
+		t.Errorf("movie details: %d %+v", code, d)
+	}
+	if code, _ = get("type=movie&xtream_id=5&provider=nope"); code != http.StatusNotFound {
+		t.Errorf("unknown provider: status %d, want 404", code)
+	}
+}

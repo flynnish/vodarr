@@ -805,3 +805,23 @@ func TestFirstSyncDelay(t *testing.T) {
 		})
 	}
 }
+
+func TestNumericTitles(t *testing.T) {
+	cases := []struct{ name, title, year string }{
+		{"1923", "1923", ""},
+		{"1985 (2023)", "1985", "2023"},
+		{"1923 - 2022", "1923", "2022"},
+		{"1883 [2021]", "1883", "2021"},
+		{"EN - 1923", "EN - 1923", ""},            // the number is the title, not a year
+		{"EN - 1985 (2023)", "EN - 1985", "2023"}, // only the one trailing year goes
+		{"Movie - 2016", "Movie", "2016"},
+	}
+	for _, c := range cases {
+		if got := cleanTitleForSearch(c.name, nil); got != c.title {
+			t.Errorf("cleanTitleForSearch(%q) = %q, want %q", c.name, got, c.title)
+		}
+		if got := extractNameYear(c.name, nil); got != c.year {
+			t.Errorf("extractNameYear(%q) = %q, want %q", c.name, got, c.year)
+		}
+	}
+}
