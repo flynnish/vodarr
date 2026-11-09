@@ -36,6 +36,9 @@ type SeriesEntry struct {
 	// FetchedAt is when the episode list was last fetched from the provider.
 	// Zero in snapshots written before it existed, which makes them stale.
 	FetchedAt time.Time `json:"fetched_at,omitempty"`
+	// TMDBId is the TMDB ID the series' info tagged it with, which the bulk
+	// series list often leaves out.
+	TMDBId int `json:"tmdb_id,omitempty"`
 }
 
 // seriesRefreshAge is how long a series' episode list is reused before it is

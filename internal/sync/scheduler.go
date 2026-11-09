@@ -156,6 +156,10 @@ type Scheduler struct {
 	cfg          *config.Config
 	xtream       *xtream.Client // primary provider
 	extra        []source       // extra providers (SetProviders)
+
+	// vodTags caches, by item key, the TMDB ID a movie's get_vod_info tagged
+	// it with (0 for none), so an unmatched movie is asked about once per run.
+	vodTags      gosync.Map
 	tmdb         *tmdb.Client
 	tvdb         *tvdb.Client // nil when tvdb_api_key is not configured
 	idx          *index.Index
@@ -745,6 +749,7 @@ func (s *Scheduler) fetchProvider(ctx context.Context, src source, excludedCats,
 				if cs == prev.Checksum && len(prev.Episodes) > 0 && !seriesStale(id, prev.FetchedAt, now) {
 					item := buildSeriesItem(sr)
 					item.Episodes = prev.Episodes
+					applyInfoTag(item, prev.TMDBId)
 					skippedItems[id] = item
 					fetchedAt[id] = prev.FetchedAt
 					continue
@@ -790,6 +795,7 @@ func (s *Scheduler) fetchProvider(ctx context.Context, src source, excludedCats,
 
 				info, err := xc.GetSeriesInfo(ctx, sr.SeriesID.Int())
 				if err == nil {
+					applyInfoTag(item, info.Info.TMDBId.Int())
 					for seasonStr, eps := range info.Episodes {
 						season, _ := strconv.Atoi(seasonStr)
 						for _, ep := range eps {
@@ -827,6 +833,7 @@ func (s *Scheduler) fetchProvider(ctx context.Context, src source, excludedCats,
 					// A failed refetch keeps the last good list rather than
 					// dropping every episode; its old fetch time retries it next sync.
 					item.Episodes = prev.Episodes
+					applyInfoTag(item, prev.TMDBId)
 					fetchedAt[sr.SeriesID.Int()] = prev.FetchedAt
 				}
 				fetchMu.Unlock()
@@ -884,6 +891,7 @@ func (s *Scheduler) fetchProvider(ctx context.Context, src source, excludedCats,
 			Checksum:     SeriesChecksum(sr.Name, lm, len(eps)),
 			Episodes:     eps,
 			FetchedAt:    fetchedAt[id],
+			TMDBId:       infoTag(skippedItems[id], fetchedItems[id]),
 		}
 	}
 	if err := SaveSnapshot(snapPath, newSnap); err != nil {
@@ -891,6 +899,27 @@ func (s *Scheduler) fetchProvider(ctx context.Context, src source, excludedCats,
 	}
 
 	return items, nil
+}
+
+// applyInfoTag gives a series the TMDB ID its get_series_info tagged it
+// with, when the bulk series list (which buildSeriesItem reads) did not.
+func applyInfoTag(item *index.Item, tmdbID int) {
+	if item.TMDBId == "" && tmdbID > 0 {
+		item.TMDBId = strconv.Itoa(tmdbID)
+		item.ProviderTMDBId = item.TMDBId
+	}
+}
+
+// infoTag returns the provider's TMDB tag of whichever item is set, as an int
+// for the snapshot.
+func infoTag(items ...*index.Item) int {
+	for _, it := range items {
+		if it != nil {
+			n, _ := strconv.Atoi(it.ProviderTMDBId)
+			return n
+		}
+	}
+	return 0
 }
 
 // buildSeriesItem constructs a series index.Item from bulk Xtream metadata
@@ -994,6 +1023,9 @@ func (s *Scheduler) enrich(ctx context.Context, items []*index.Item, cachedByKey
 					// A TVDB ID shared with an entry for a different TMDB show
 					// was borrowed by an older TVDB name search: re-match.
 					stale = stale || (ok && conflicting[ci.TVDBId] && !ci.ManualMatch)
+					// The provider has tagged the item since it was matched, or
+					// changed its tag: match by the tag rather than the old result.
+					stale = stale || (ok && item.TMDBId != "" && ci.ProviderTMDBId != item.TMDBId && ci.TMDBId != item.TMDBId && !ci.ManualMatch)
 					if ok && ci.Name == item.Name && !stale {
 						if ci.IMDBId != "" || ci.TVDBId != "" {
 							item.IMDBId = ci.IMDBId
@@ -1025,6 +1057,14 @@ func (s *Scheduler) enrich(ctx context.Context, items []*index.Item, cachedByKey
 				// those the provider never tagged). Never call resolveByTitle when
 				// we already have a TMDBId — a title search could overwrite a
 				// correct provider-supplied ID with a wrong match.
+				if item.TMDBId == "" && item.Type == index.TypeMovie {
+					// The bulk VOD list often omits the tag get_vod_info has.
+					if tag := s.vodInfoTag(ctx, item); tag > 0 {
+						item.TMDBId = strconv.Itoa(tag)
+						item.ProviderTMDBId = item.TMDBId
+						providerTMDBId = item.TMDBId
+					}
+				}
 				if item.TMDBId == "" {
 					if err := s.resolveByTitle(ctx, item); err != nil {
 						slog.Debug("title resolve failed", "name", item.Name, "error", err)
@@ -1271,6 +1311,32 @@ func (s *Scheduler) resolveByTitle(ctx context.Context, item *index.Item) error 
 		}
 	}
 	return nil
+}
+
+// vodInfoTag returns the TMDB ID a movie's get_vod_info tags it with, or 0.
+// Each item is asked about at most once per run.
+func (s *Scheduler) vodInfoTag(ctx context.Context, item *index.Item) int {
+	key := item.Key()
+	if v, ok := s.vodTags.Load(key); ok {
+		return v.(int)
+	}
+	var xc *xtream.Client
+	for _, src := range s.sources() {
+		if src.id == item.Provider {
+			xc = src.client
+		}
+	}
+	if xc == nil {
+		return 0
+	}
+	info, err := xc.GetVODInfo(ctx, item.XtreamID)
+	if err != nil {
+		slog.Debug("vod info fetch failed", "name", item.Name, "error", err)
+		return 0 // not cached: retried next sync
+	}
+	tag := info.Info.TMDBId.Int()
+	s.vodTags.Store(key, tag)
+	return tag
 }
 
 // resolveByTVDB searches TVDB by title to obtain a TVDB ID for a series that
