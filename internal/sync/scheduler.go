@@ -106,6 +106,8 @@ func cleanTitleForSearch(name string, patterns []*regexp.Regexp) string {
 	title = dolbyRe.ReplaceAllString(title, "")
 	title = nlGespokenRe.ReplaceAllString(title, "")
 	title, _ = splitTrailingYear(strings.TrimSpace(title))
+	// TMDB finds "The Office", not the catalogue form "Office, The".
+	title = index.MoveTrailingArticle(title)
 	for _, re := range patterns {
 		title = re.ReplaceAllString(title, "")
 	}

@@ -825,3 +825,14 @@ func TestNumericTitles(t *testing.T) {
 		}
 	}
 }
+
+func TestCatalogueStyleArticles(t *testing.T) {
+	if got := cleanTitleForSearch("Office, The (2005)", nil); got != "The Office" {
+		t.Errorf("cleanTitleForSearch = %q, want The Office", got)
+	}
+	for _, s := range []string{"Office", "Office, The (2005)", "The Office (US)"} {
+		if normalizeSeriesTitle(s) != normalizeSeriesTitle("The Office") {
+			t.Errorf("normalizeSeriesTitle(%q) = %q, want it equal to The Office's", s, normalizeSeriesTitle(s))
+		}
+	}
+}

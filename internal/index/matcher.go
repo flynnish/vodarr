@@ -1,13 +1,34 @@
 package index
 
 import (
+	"regexp"
 	"strings"
 	"unicode"
 )
 
+// trailingArticleRe matches a catalogue-style title with its article moved
+// to the end, "Office, The", optionally followed by a qualifier such as
+// "(2005)" or "[UK]".
+var trailingArticleRe = regexp.MustCompile(`(?i)^\s*(.+?),\s*(the|a|an)(\s*[(\[].*)?\s*$`)
+
+// MoveTrailingArticle turns "Office, The" into "The Office" (keeping any
+// trailing qualifier), so it can be searched for and compared.
+func MoveTrailingArticle(s string) string {
+	return trailingArticleRe.ReplaceAllString(s, "$2 $1$3")
+}
+
+// NormalizeTitle reduces a title to a comparable form, so that "The Office",
+// "Office" and "Office, The" or "Fast & Furious" and "Fast and Furious" are
+// the same: lowercased, punctuation removed, "&" read as "and" and a leading
+// (or catalogue-style trailing) "the", "a" or "an" dropped.
+func NormalizeTitle(s string) string {
+	return normalizeTitle(s)
+}
+
 // normalizeTitle lowercases, strips punctuation and common noise words.
 func normalizeTitle(s string) string {
-	s = strings.ToLower(s)
+	s = MoveTrailingArticle(s)
+	s = strings.ReplaceAll(strings.ToLower(s), "&", " and ")
 
 	// Remove common noise: articles, punctuation
 	var b strings.Builder

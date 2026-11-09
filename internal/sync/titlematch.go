@@ -4,8 +4,6 @@ import (
 	"context"
 	"regexp"
 	"strconv"
-	"strings"
-	"unicode"
 
 	"github.com/vodarr/vodarr/internal/index"
 	"github.com/vodarr/vodarr/internal/tmdb"
@@ -30,26 +28,11 @@ const maxDetailChecks = 5
 // "(US)" or "(UK)" that TVDB and IPTV providers append to shared titles.
 var trailingQualifierRe = regexp.MustCompile(`\s*\((\d{4}|[A-Za-z]{2})\)\s*$`)
 
-// normalizeSeriesTitle reduces a title to a comparable form: lowercased,
-// punctuation removed, "&" treated as "and", leading article and trailing
-// year/country disambiguator dropped.
+// normalizeSeriesTitle reduces a title to a comparable form, as
+// index.NormalizeTitle does ("The Office", "Office" and "Office, The" are
+// the same), with a trailing year/country disambiguator dropped too.
 func normalizeSeriesTitle(s string) string {
-	s = trailingQualifierRe.ReplaceAllString(s, "")
-	s = strings.ReplaceAll(strings.ToLower(s), "&", " and ")
-
-	var b strings.Builder
-	prevSpace := true
-	for _, r := range s {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			b.WriteRune(r)
-			prevSpace = false
-		} else if !prevSpace {
-			b.WriteRune(' ')
-			prevSpace = true
-		}
-	}
-	out := strings.TrimSpace(b.String())
-	return strings.TrimPrefix(out, "the ")
+	return index.NormalizeTitle(trailingQualifierRe.ReplaceAllString(index.MoveTrailingArticle(s), ""))
 }
 
 // maxSeason returns the highest season number among a series' episodes.

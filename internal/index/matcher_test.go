@@ -208,3 +208,26 @@ func TestIndexCounts(t *testing.T) {
 		t.Errorf("series = %d, want 1", series)
 	}
 }
+
+func TestNormalizeTitleArticles(t *testing.T) {
+	same := [][]string{
+		{"The Office", "Office", "Office, The", "office, the"},
+		{"A Quiet Place", "Quiet Place", "Quiet Place, A"},
+		{"Fast & Furious", "Fast and Furious"},
+	}
+	for _, group := range same {
+		want := NormalizeTitle(group[0])
+		for _, s := range group[1:] {
+			if got := NormalizeTitle(s); got != want {
+				t.Errorf("NormalizeTitle(%q) = %q, want %q like %q", s, got, want, group[0])
+			}
+		}
+	}
+	// Only a catalogue-style article after a comma moves; "Plan A" keeps its A.
+	if got := NormalizeTitle("Plan A"); got != "plan a" {
+		t.Errorf(`NormalizeTitle("Plan A") = %q`, got)
+	}
+	if got := MoveTrailingArticle("Office, The (2005)"); got != "The Office (2005)" {
+		t.Errorf("MoveTrailingArticle = %q", got)
+	}
+}
