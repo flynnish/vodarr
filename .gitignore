@@ -12,7 +12,9 @@ config.yml
 # Frontend build output (goes to internal/web/dist/ at build time)
 web/node_modules/
 web/dist/
-internal/web/dist/
+# The folder itself is kept (by .gitkeep) so go:embed builds without a UI build.
+internal/web/dist/*
+!internal/web/dist/.gitkeep
 
 # Logs
 *.log

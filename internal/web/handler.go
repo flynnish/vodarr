@@ -753,7 +753,10 @@ func (h *Handler) handleRestart(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		time.Sleep(150 * time.Millisecond) // let the response flush
 		slog.Info("restarting via API request")
-		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+		// os.Process.Signal builds on every platform, unlike syscall.Kill.
+		if p, err := os.FindProcess(os.Getpid()); err == nil {
+			_ = p.Signal(syscall.SIGTERM)
+		}
 	}()
 }
 
