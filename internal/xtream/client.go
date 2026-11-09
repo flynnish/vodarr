@@ -1,10 +1,13 @@
 package xtream
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -88,6 +91,23 @@ type VODInfo struct {
 	} `json:"movie_data"`
 }
 
+// UnmarshalJSON reads what it can of a VOD's info: providers send "info": []
+// for a title with none, and the odd mistyped field.
+func (v *VODInfo) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Info      json.RawMessage `json:"info"`
+		MovieData json.RawMessage `json:"movie_data"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*v = VODInfo{}
+	if err := lenientUnmarshal(raw.Info, &v.Info); err != nil {
+		return err
+	}
+	return lenientUnmarshal(raw.MovieData, &v.MovieData)
+}
+
 type VODInfoDetail struct {
 	TMDBId      FlexInt          `json:"tmdb_id"`
 	Name        string           `json:"name"`
@@ -100,7 +120,7 @@ type VODInfoDetail struct {
 	Duration    string           `json:"duration"`
 	Backdrop    FlexStringSlice  `json:"backdrop_path"`
 	MovieImage  string           `json:"movie_image"`
-	Bitrate     int              `json:"bitrate"`
+	Bitrate     FlexInt          `json:"bitrate"`
 	// Deliberately NOT json.RawMessage, unlike EpisodeInfo.Video: this one is read,
 	// at EstimateMovieFileSize (Video.Tags["DURATION"]). If a provider ever sends a
 	// string here it needs a real shadow-type UnmarshalJSON, not a raw field.
@@ -137,34 +157,126 @@ type SeriesInfo struct {
 	Episodes EpisodeMap           `json:"episodes"`
 }
 
+// UnmarshalJSON reads what it can of a series' info. A long-running show has
+// hundreds of episodes, and one mistyped field in one of them, or "info": []
+// for a show with no details, used to discard the whole show.
+func (si *SeriesInfo) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Info     json.RawMessage `json:"info"`
+		Seasons  json.RawMessage `json:"seasons"`
+		Episodes EpisodeMap      `json:"episodes"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*si = SeriesInfo{Seasons: raw.Seasons, Episodes: raw.Episodes}
+	return lenientUnmarshal(raw.Info, &si.Info)
+}
+
+// lenientUnmarshal decodes a JSON object into v, keeping every field that
+// decodes when some have the wrong type (encoding/json skips just those).
+// Anything but an object (null, [], "", false) leaves v zero. The data has
+// already passed a full decode, so it is valid JSON: only type mismatches are
+// forgiven, and they are logged.
+func lenientUnmarshal(data json.RawMessage, v interface{}) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		return nil
+	}
+	err := json.Unmarshal(data, v)
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		slog.Debug("xtream: skipped a mistyped field", "field", typeErr.Field, "got", typeErr.Value)
+		return nil
+	}
+	return err
+}
+
 // EpisodeMap holds a series' episodes keyed by season number. Most providers
-// send an object keyed by season; some send an array of per-season arrays, or
-// one flat array. Those are grouped by each episode's own season.
+// send an object keyed by season, each holding an array of episodes; some
+// send an array of per-season arrays, one flat array, or a season's episodes
+// as an object keyed by index. Episodes not under a season key are grouped by
+// their own season. Anything else (null, "", false) means no episodes.
 type EpisodeMap map[string][]Episode
 
 func (m *EpisodeMap) UnmarshalJSON(data []byte) error {
-	var byKey map[string][]Episode
-	if err := json.Unmarshal(data, &byKey); err == nil {
-		*m = byKey
-		return nil
-	}
-	var seasons [][]Episode
-	if err := json.Unmarshal(data, &seasons); err != nil {
-		var flat []Episode
-		if err2 := json.Unmarshal(data, &flat); err2 != nil {
+	out := EpisodeMap{}
+	data = bytes.TrimSpace(data)
+	if len(data) > 0 && data[0] == '{' {
+		var byKey map[string]json.RawMessage
+		if err := json.Unmarshal(data, &byKey); err != nil {
 			return err
 		}
-		seasons = [][]Episode{flat}
-	}
-	out := EpisodeMap{}
-	for _, eps := range seasons {
-		for _, ep := range eps {
-			key := strconv.Itoa(ep.Season.Int())
-			out[key] = append(out[key], ep)
+		for key, v := range byKey {
+			if isEpisode(v) { // the object is itself keyed by episode
+				out = EpisodeMap{}
+				out.addBySeason(episodeList(data))
+				break
+			}
+			if eps := episodeList(v); len(eps) > 0 {
+				out[key] = append(out[key], eps...)
+			}
 		}
+	} else if len(data) > 0 && data[0] == '[' {
+		out.addBySeason(episodeList(data))
 	}
 	*m = out
 	return nil
+}
+
+func (m EpisodeMap) addBySeason(eps []Episode) {
+	for _, ep := range eps {
+		key := strconv.Itoa(ep.Season.Int())
+		m[key] = append(m[key], ep)
+	}
+}
+
+// isEpisode reports whether a JSON value is a single episode object rather
+// than a season's collection of them.
+func isEpisode(data json.RawMessage) bool {
+	var probe struct {
+		ID         json.RawMessage `json:"id"`
+		EpisodeNum json.RawMessage `json:"episode_num"`
+	}
+	data = bytes.TrimSpace(data)
+	return len(data) > 0 && data[0] == '{' && json.Unmarshal(data, &probe) == nil && (probe.ID != nil || probe.EpisodeNum != nil)
+}
+
+// episodeList collects the episodes in an array, or object, of episodes,
+// descending into nested arrays. Each episode is decoded on its own, so one
+// mistyped field costs only that field.
+func episodeList(data json.RawMessage) []Episode {
+	data = bytes.TrimSpace(data)
+	var items []json.RawMessage
+	switch {
+	case len(data) == 0:
+	case data[0] == '[':
+		json.Unmarshal(data, &items)
+	case isEpisode(data):
+		items = []json.RawMessage{data}
+	case data[0] == '{':
+		var byIndex map[string]json.RawMessage
+		json.Unmarshal(data, &byIndex)
+		for _, v := range byIndex {
+			items = append(items, v)
+		}
+	}
+	var out []Episode
+	for _, it := range items {
+		it = bytes.TrimSpace(it)
+		if len(it) == 0 {
+			continue
+		}
+		if it[0] == '[' {
+			out = append(out, episodeList(it)...)
+			continue
+		}
+		var ep Episode
+		if it[0] == '{' && lenientUnmarshal(it, &ep) == nil {
+			out = append(out, ep)
+		}
+	}
+	return out
 }
 
 type SeriesInfoDetail struct {
@@ -204,24 +316,13 @@ type EpisodeInfo struct {
 	ReleaseDate  string            `json:"releasedate"`
 	Plot         string            `json:"plot"`
 	Duration     string            `json:"duration"`
-	DurationSecs int               `json:"duration_secs"`
-	Bitrate      int               `json:"bitrate"`
+	DurationSecs FlexInt           `json:"duration_secs"`
+	Bitrate      FlexInt           `json:"bitrate"`
 	MovieImage   string            `json:"movie_image"`
 	Rating       FlexFloat         `json:"rating"`
 	// Provider may return the tags object, a bare string, null or []. The field is
-	// unused, so keep it raw rather than typed.
-	//
-	// A typed target does not abort the decode: encoding/json records an
-	// UnmarshalTypeError, skips that one value and carries on, so the episodes all
-	// decode and only Decode's return value is non-nil. The caller in internal/sync
-	// takes the result only when err == nil, so one bad nested field discards a
-	// series that parsed perfectly.
-	//
-	// Do not "fix" that by using the partial result when the error is only a type
-	// error. It would work here and it would silently swallow genuine decode
-	// failures, which is strictly worse than a raw field.
-	//
-	// Same treatment as Seasons above, for the same reason.
+	// unused, so keep it raw rather than typed. (Episodes are decoded one by one
+	// with lenientUnmarshal, so a mistyped field would now cost only itself.)
 	Video        json.RawMessage   `json:"video"`
 }
 

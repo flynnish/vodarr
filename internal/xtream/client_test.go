@@ -339,3 +339,57 @@ func TestEpisodeMapAcceptsArrays(t *testing.T) {
 		}
 	}
 }
+
+func TestSeriesInfoSurvivesOddFields(t *testing.T) {
+	cases := []struct {
+		name, body string
+		episodes   int
+		plot       string
+	}{
+		{"info is an empty array", `{"info":[],"episodes":{"1":[{"id":"1","episode_num":1}]}}`, 1, ""},
+		{"mistyped fields in one episode", `{"info":{"plot":"Panel show","rating":"8/10"},"episodes":{"1":[
+			{"id":"1","episode_num":1,"title":1985,"info":{"duration_secs":"1800","bitrate":"x"}},
+			{"id":"2","episode_num":2,"title":"Two"}]}}`, 2, "Panel show"},
+		{"season as an object keyed by index", `{"episodes":{"1":{"0":{"id":"1","episode_num":1},"1":{"id":"2","episode_num":2}}}}`, 2, ""},
+		{"object keyed by episode", `{"episodes":{"501":{"id":"501","episode_num":1,"season":3},"502":{"id":"502","episode_num":2,"season":3}}}`, 2, ""},
+		{"episodes false", `{"info":{"plot":"P"},"episodes":false}`, 0, "P"},
+	}
+	for _, c := range cases {
+		var si SeriesInfo
+		if err := json.Unmarshal([]byte(c.body), &si); err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		n := 0
+		for _, eps := range si.Episodes {
+			n += len(eps)
+		}
+		if n != c.episodes || si.Info.Plot != c.plot {
+			t.Errorf("%s: %d episodes, plot %q; want %d, %q", c.name, n, si.Info.Plot, c.episodes, c.plot)
+		}
+	}
+
+	var si SeriesInfo
+	json.Unmarshal([]byte(`{"episodes":{"1":[{"id":"1","episode_num":1,"title":"A","info":{"duration_secs":"1800"}}]}}`), &si)
+	if ep := si.Episodes["1"][0]; ep.Title != "A" || ep.Info.DurationSecs.Int() != 1800 {
+		t.Errorf("episode fields lost: %+v", ep)
+	}
+	var byID SeriesInfo
+	json.Unmarshal([]byte(`{"episodes":{"501":{"id":"501","episode_num":1,"season":3}}}`), &byID)
+	if len(byID.Episodes["3"]) != 1 {
+		t.Errorf("episodes keyed by ID not grouped by their season: %v", byID.Episodes)
+	}
+	if err := json.Unmarshal([]byte(`{"info":{`), &si); err == nil {
+		t.Error("broken JSON accepted")
+	}
+}
+
+func TestVODInfoEmptyArray(t *testing.T) {
+	var v VODInfo
+	if err := json.Unmarshal([]byte(`{"info":[],"movie_data":{"stream_id":5,"name":"1985"}}`), &v); err != nil || v.MovieData.Name != "1985" {
+		t.Errorf("VODInfo = %+v, %v", v, err)
+	}
+	if err := json.Unmarshal([]byte(`{"info":{"tmdb_id":"27205","bitrate":"high"}}`), &v); err != nil || v.Info.TMDBId.Int() != 27205 {
+		t.Errorf("VODInfo with mistyped bitrate = %+v, %v", v, err)
+	}
+}

@@ -806,7 +806,7 @@ func (s *Scheduler) fetchProvider(ctx context.Context, src source, excludedCats,
 								Title:      ep.Title,
 								Ext:        ep.ContainerExt,
 								Duration:   parseDuration(ep.Info.Duration),
-								FileSize:   estimateEpisodeFileSize(ep.Info.Bitrate, ep.Info.DurationSecs),
+								FileSize:   estimateEpisodeFileSize(ep.Info.Bitrate.Int(), ep.Info.DurationSecs.Int()),
 							})
 						}
 					}
