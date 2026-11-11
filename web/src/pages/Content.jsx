@@ -459,6 +459,17 @@ function MatchDialog({ item, onClose, onUpdated }) {
   // text selection dragged out of the dialog does not close it.
   const pressedBackdrop = useRef(false)
 
+  // A poster clicked to read it at full size; Esc or a click closes it.
+  const [zoomed, setZoomed] = useState(null)
+  useEffect(() => {
+    if (!zoomed) return
+    const onKey = e => { if (e.key === 'Escape') setZoomed(null) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [zoomed])
+  // TMDB thumbnails are w92; the same image comes in w500.
+  const fullSize = url => url.replace('image.tmdb.org/t/p/w92/', 'image.tmdb.org/t/p/w500/')
+
   const search = async e => {
     e?.preventDefault()
     if (!q.trim() || /themoviedb\.org\//.test(q)) return
@@ -520,6 +531,15 @@ function MatchDialog({ item, onClose, onUpdated }) {
       onMouseDown={e => { pressedBackdrop.current = e.target === e.currentTarget }}
       onClick={e => { if (e.target === e.currentTarget && pressedBackdrop.current && !busy) onClose() }}
     >
+      {zoomed && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 p-4 cursor-zoom-out"
+          onMouseDown={e => e.stopPropagation()}
+          onClick={e => { e.stopPropagation(); setZoomed(null) }}
+        >
+          <img src={zoomed} alt="" className="max-w-full max-h-full rounded shadow-2xl object-contain" />
+        </div>
+      )}
       <div className="w-full max-w-2xl max-h-[90vh] flex flex-col bg-void-800 border border-void-600 rounded-lg overflow-hidden">
         <div className="px-5 py-3 border-b border-void-600 bg-void-700/40 flex items-start justify-between gap-4">
           <div className="min-w-0">
@@ -542,7 +562,11 @@ function MatchDialog({ item, onClose, onUpdated }) {
           </p>
           <div className="flex gap-3 items-start">
             {poster
-              ? <img src={poster} alt="" className="w-16 h-24 rounded object-cover flex-none bg-void-700" />
+              ? (
+                <button type="button" onClick={() => setZoomed(poster)} title="Click to enlarge" className="flex-none cursor-zoom-in">
+                  <img src={poster} alt="" className="w-16 h-24 rounded object-cover bg-void-700 hover:ring-2 hover:ring-lime-400/40" />
+                </button>
+              )
               : <div className="w-16 h-24 rounded flex-none bg-void-700" />}
             <div className="flex-1 min-w-0 space-y-1 font-mono text-[11px] text-steel-400">
               {info.name && info.name !== item.Name && <p className="text-steel-300">{info.name}</p>}
@@ -694,7 +718,11 @@ function MatchDialog({ item, onClose, onUpdated }) {
             return (
               <div key={r.id} className="flex gap-3 px-5 py-2.5 items-start">
                 {r.poster
-                  ? <img src={r.poster} alt="" className="w-10 h-14 rounded object-cover flex-none bg-void-700" loading="lazy" />
+                  ? (
+                    <button type="button" onClick={() => setZoomed(fullSize(r.poster))} title="Click to enlarge" className="flex-none cursor-zoom-in">
+                      <img src={r.poster} alt="" className="w-10 h-14 rounded object-cover bg-void-700 hover:ring-2 hover:ring-lime-400/40" loading="lazy" />
+                    </button>
+                  )
                   : <div className="w-10 h-14 rounded flex-none bg-void-700" />}
                 <div className="flex-1 min-w-0">
                   <p className="font-display text-[13px] text-steel-300">
