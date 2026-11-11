@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -37,6 +38,8 @@ import (
 type MatchOverride struct {
 	TMDBId string `json:"tmdb_id,omitempty"`
 	TVDBId string `json:"tvdb_id,omitempty"`
+	// IMDBId, when set, is used as given, whatever TMDB links the title to.
+	IMDBId string `json:"imdb_id,omitempty"`
 
 	AsType       string `json:"as_type,omitempty"`       // "movie" or "series"; "" = provider type
 	Season       int    `json:"season,omitempty"`        // movie -> episode
@@ -44,6 +47,9 @@ type MatchOverride struct {
 	EpisodeID    int    `json:"episode_id,omitempty"`    // series -> movie
 	SeasonOffset int    `json:"season_offset,omitempty"` // provider series only
 }
+
+// imdbIDRe matches an IMDB title ID such as "tt0944947".
+var imdbIDRe = regexp.MustCompile(`^tt\d{6,10}$`)
 
 // maxSeasonOffset bounds SeasonOffset to a sane range.
 const maxSeasonOffset = 100
@@ -252,6 +258,9 @@ func (s *Scheduler) applyOverride(ctx context.Context, item *index.Item, ov Matc
 	if ov.TVDBId != "" {
 		item.TVDBId = ov.TVDBId
 	}
+	if ov.IMDBId != "" {
+		item.IMDBId = ov.IMDBId
+	}
 	if item.IMDBId == "" && item.TVDBId == "" {
 		item.EnrichFailReason = "manual match has no IMDB/TVDB cross-reference"
 	}
@@ -267,7 +276,8 @@ func (s *Scheduler) reapplyOverrides(ctx context.Context, items []*index.Item) {
 		}
 		sameType := ov.AsType == "" || item.Type == index.MediaType(ov.AsType)
 		sameSeasons := item.SeasonOffset == ov.SeasonOffset
-		if item.ManualMatch && sameType && sameSeasons && item.TMDBId == ov.TMDBId && (ov.TVDBId == "" || item.TVDBId == ov.TVDBId) {
+		if item.ManualMatch && sameType && sameSeasons && item.TMDBId == ov.TMDBId &&
+			(ov.TVDBId == "" || item.TVDBId == ov.TVDBId) && (ov.IMDBId == "" || item.IMDBId == ov.IMDBId) {
 			continue
 		}
 		if err := s.applyOverride(ctx, item, ov); err != nil {
@@ -287,13 +297,17 @@ func (s *Scheduler) SetMatch(ctx context.Context, mediaType index.MediaType, xtr
 func (s *Scheduler) SetMatchFor(ctx context.Context, provider string, mediaType index.MediaType, xtreamID int, ov MatchOverride) (*index.Item, error) {
 	ov.TMDBId = strings.TrimSpace(ov.TMDBId)
 	ov.TVDBId = strings.TrimSpace(ov.TVDBId)
+	ov.IMDBId = strings.ToLower(strings.TrimSpace(ov.IMDBId))
 	for _, id := range []string{ov.TMDBId, ov.TVDBId} {
 		if n, err := strconv.Atoi(id); id != "" && (err != nil || n <= 0) {
 			return nil, fmt.Errorf("invalid ID %q", id)
 		}
 	}
-	if ov.TMDBId == "" && ov.TVDBId == "" {
-		return nil, errors.New("a TMDB or TVDB ID is required")
+	if ov.IMDBId != "" && !imdbIDRe.MatchString(ov.IMDBId) {
+		return nil, fmt.Errorf("invalid IMDB ID %q: it looks like tt0944947", ov.IMDBId)
+	}
+	if ov.TMDBId == "" && ov.TVDBId == "" && ov.IMDBId == "" {
+		return nil, errors.New("a TMDB, TVDB or IMDB ID is required")
 	}
 
 	item := s.idx.Lookup(provider, xtreamID, string(mediaType))
@@ -312,6 +326,21 @@ func (s *Scheduler) SetMatchFor(ctx context.Context, provider string, mediaType 
 	}
 	if ov.TVDBId != "" && target != index.TypeSeries {
 		return nil, errors.New("a TVDB ID only applies to series")
+	}
+	// An IMDB ID alone: find the TMDB entry it belongs to, for the title,
+	// year and (for a series) the TVDB ID Sonarr searches by.
+	if ov.IMDBId != "" && ov.TMDBId == "" && s.tmdb != nil && s.cfg.TMDB.APIKey != "" {
+		movieID, tvID, err := s.tmdb.FindByIMDB(ctx, ov.IMDBId)
+		if err != nil {
+			return nil, err
+		}
+		id := movieID
+		if target == index.TypeSeries {
+			id = tvID
+		}
+		if id > 0 {
+			ov.TMDBId = strconv.Itoa(id)
+		}
 	}
 	switch {
 	case mediaType == index.TypeMovie && target == index.TypeSeries:

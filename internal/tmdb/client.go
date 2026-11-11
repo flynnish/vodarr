@@ -253,6 +253,33 @@ func (c *Client) GetTVExternalIDs(ctx context.Context, tmdbID int) (*ExternalIDs
 	return &ids, nil
 }
 
+// FindByIMDB returns the TMDB movie and TV show IDs that TMDB links to an
+// IMDB ID ("tt0944947"); 0 where it has none.
+func (c *Client) FindByIMDB(ctx context.Context, imdbID string) (movieID, tvID int, err error) {
+	var resp struct {
+		MovieResults []struct {
+			ID int `json:"id"`
+		} `json:"movie_results"`
+		TVResults []struct {
+			ID int `json:"id"`
+		} `json:"tv_results"`
+	}
+	params := url.Values{"external_source": {"imdb_id"}}
+	if err := c.get(ctx, "/find/"+url.PathEscape(imdbID), params, &resp); err != nil {
+		if errors.Is(err, errNotFound) {
+			return 0, 0, nil
+		}
+		return 0, 0, fmt.Errorf("find %s: %w", imdbID, err)
+	}
+	if len(resp.MovieResults) > 0 {
+		movieID = resp.MovieResults[0].ID
+	}
+	if len(resp.TVResults) > 0 {
+		tvID = resp.TVResults[0].ID
+	}
+	return movieID, tvID, nil
+}
+
 // MovieDetails holds the title, runtime, and release date for a movie.
 type MovieDetails struct {
 	Title       string

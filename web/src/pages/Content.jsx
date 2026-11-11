@@ -404,6 +404,7 @@ function MatchDialog({ item, onClose, onUpdated }) {
   const [error, setError] = useState(null)
   const [tmdbId, setTmdbId] = useState('')
   const [tvdbId, setTvdbId] = useState('')
+  const [imdbId, setImdbId] = useState('')
   const [season, setSeason] = useState(firstEp ? String(firstEp.Season) : '')
   const [episode, setEpisode] = useState(firstEp ? String(firstEp.EpisodeNum) : '')
   const [filmEpisode, setFilmEpisode] = useState(String(item.stream_episode_id || providerEpisodes[0]?.EpisodeID || ''))
@@ -736,13 +737,24 @@ function MatchDialog({ item, onClose, onUpdated }) {
                 className={`w-28 ${input}`}
               />
             )}
+            <input
+              value={imdbId}
+              onChange={e => {
+                // Takes "tt0944947" or an IMDB link (imdb.com/title/tt0944947/).
+                const m = e.target.value.match(/tt\d{6,10}/i)
+                setImdbId(m ? m[0].toLowerCase() : e.target.value.replace(/[^tT\d]/g, '').slice(0, 12))
+              }}
+              placeholder="IMDB ID / link"
+              title="Used as given. VODarr also looks up the TMDB entry for it, for the title and (for series) the TVDB ID"
+              className={`w-32 ${input}`}
+            />
             <button
               type="button"
-              disabled={busy || (!tmdbId && !tvdbId) || missingDetails}
-              onClick={() => apply({ tmdb_id: tmdbId, tvdb_id: target === 'series' ? tvdbId : '' })}
+              disabled={busy || (!tmdbId && !tvdbId && !imdbId) || missingDetails}
+              onClick={() => apply({ tmdb_id: tmdbId, tvdb_id: target === 'series' ? tvdbId : '', imdb_id: imdbId })}
               className="px-3 py-1 bg-void-600 border border-void-500 rounded font-mono text-[11px] text-steel-300 hover:bg-void-500 disabled:opacity-40"
             >
-              Use ID{target === 'series' ? 's' : ''}
+              Use IDs
             </button>
             {item.manual_match && (
               <button

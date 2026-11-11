@@ -314,6 +314,7 @@ type matchRequest struct {
 	Provider string `json:"provider"` // "" = primary provider
 	TMDBId   string `json:"tmdb_id"`
 	TVDBId   string `json:"tvdb_id"`
+	IMDBId   string `json:"imdb_id"`
 
 	// Optional type change, see vodarrsync.MatchOverride.
 	AsType    string `json:"as_type"`
@@ -345,7 +346,7 @@ func (h *Handler) handlePutMatch(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	item, err := h.scheduler.SetMatchFor(ctx, req.Provider, mt, req.XtreamID, vodarrsync.MatchOverride{
-		TMDBId: req.TMDBId, TVDBId: req.TVDBId,
+		TMDBId: req.TMDBId, TVDBId: req.TVDBId, IMDBId: req.IMDBId,
 		AsType: req.AsType, Season: req.Season, Episode: req.Episode, EpisodeID: req.EpisodeID,
 		SeasonOffset: req.SeasonOffset,
 	})

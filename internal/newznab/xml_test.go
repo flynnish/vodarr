@@ -610,3 +610,16 @@ func TestIPTVLanguageInRSSItems(t *testing.T) {
 		}
 	}
 }
+
+func TestReleaseTitlesSpellAmpersandAsAnd(t *testing.T) {
+	for in, want := range map[string]string{
+		"Law & Order":   "Law and Order",
+		"Fast&Furious":  "Fast and Furious",
+		"Law and Order": "Law and Order",
+		"1985 (2023)":   "1985",
+	} {
+		if got := sanitizeNameForTitle(in); got != want {
+			t.Errorf("sanitizeNameForTitle(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

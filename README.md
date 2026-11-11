@@ -182,7 +182,7 @@ Each release name carries the provider group it comes from as its **release grou
 
 ## Manual matching
 
-If a title is matched to the wrong show or movie (or not matched at all), open **Content**, find it, and click **Fix match**. Search TMDB and pick the right entry, or type a TMDB ID directly. For series you can also set the **TVDB ID**, which is what Sonarr searches by, for shows TMDB has no TVDB link for. You can also paste a TMDB link (e.g. `https://www.themoviedb.org/tv/126553-normal-people`) into the search or ID box. The top of the dialog shows what the provider itself says about the title (poster, description, cast and, for a series, the episodes it carries) to help tell same-named titles apart.
+If a title is matched to the wrong show or movie (or not matched at all), open **Content**, find it, and click **Fix match**. Search TMDB and pick the right entry, or type a TMDB or IMDB ID (or paste either site's link) directly. An IMDB ID is used as given; VODarr also looks up its TMDB entry for the title and, for series, the TVDB ID. For series you can also set the **TVDB ID**, which is what Sonarr searches by, for shows TMDB has no TVDB link for. You can also paste a TMDB link (e.g. `https://www.themoviedb.org/tv/126553-normal-people`) into the search or ID box. The top of the dialog shows what the provider itself says about the title (poster, description, cast and, for a series, the episodes it carries) to help tell same-named titles apart.
 
 A manual match applies immediately and is kept across every sync and restart. It is stored in `matches.json` next to `config.yml`. **Reset to automatic** removes it and re-runs normal matching.
 

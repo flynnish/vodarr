@@ -4,6 +4,7 @@ import (
 	"context"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/vodarr/vodarr/internal/index"
 	"github.com/vodarr/vodarr/internal/tmdb"
@@ -33,6 +34,28 @@ var trailingQualifierRe = regexp.MustCompile(`\s*\((\d{4}|[A-Za-z]{2})\)\s*$`)
 // the same), with a trailing year/country disambiguator dropped too.
 func normalizeSeriesTitle(s string) string {
 	return index.NormalizeTitle(trailingQualifierRe.ReplaceAllString(index.MoveTrailingArticle(s), ""))
+}
+
+var (
+	ampersandRe = regexp.MustCompile(`\s*&\s*`)
+	andWordRe   = regexp.MustCompile(`(?i)\s+and\s+`)
+)
+
+// titleSpellings returns the title to search TMDB for, then the same title
+// with "&" and "and" swapped when it has either: TMDB's search treats them
+// as different words, so "Law and Order" does not find "Law & Order".
+func titleSpellings(title string) []string {
+	var alt string
+	switch {
+	case strings.Contains(title, "&"):
+		alt = ampersandRe.ReplaceAllString(title, " and ")
+	case andWordRe.MatchString(title):
+		alt = andWordRe.ReplaceAllString(title, " & ")
+	}
+	if alt = strings.TrimSpace(alt); alt == "" || alt == title {
+		return []string{title}
+	}
+	return []string{title, alt}
 }
 
 // maxSeason returns the highest season number among a series' episodes.
@@ -99,30 +122,38 @@ func closestYearIndex(years []int, year int) int {
 func (s *Scheduler) searchTMDBSeries(ctx context.Context, title string, year, seasons int) (*tmdb.TVSearchResult, error) {
 	want := normalizeSeriesTitle(title)
 
-	var yearResults []tmdb.TVSearchResult
-	if year > 0 {
-		var err error
-		yearResults, err = s.tmdb.SearchTVAll(ctx, title, year)
+	// The first spelling's results are the fallback when nothing matches
+	// exactly; the other spelling ("&" / "and") is only tried for an exact one.
+	var yearResults, allResults, exact []tmdb.TVSearchResult
+	seen := make(map[int]bool)
+	for i, q := range titleSpellings(title) {
+		var yr []tmdb.TVSearchResult
+		if year > 0 {
+			var err error
+			if yr, err = s.tmdb.SearchTVAll(ctx, q, year); err != nil {
+				return nil, err
+			}
+		}
+		ar, err := s.tmdb.SearchTVAll(ctx, q, 0)
 		if err != nil {
 			return nil, err
 		}
-	}
-	allResults, err := s.tmdb.SearchTVAll(ctx, title, 0)
-	if err != nil {
-		return nil, err
-	}
-
-	var exact []tmdb.TVSearchResult
-	seen := make(map[int]bool)
-	for _, list := range [][]tmdb.TVSearchResult{yearResults, allResults} {
-		for _, r := range list {
-			if seen[r.ID] {
-				continue
+		if i == 0 {
+			yearResults, allResults = yr, ar
+		}
+		for _, list := range [][]tmdb.TVSearchResult{yr, ar} {
+			for _, r := range list {
+				if seen[r.ID] {
+					continue
+				}
+				if normalizeSeriesTitle(r.Name) == want || normalizeSeriesTitle(r.OriginalName) == want {
+					seen[r.ID] = true
+					exact = append(exact, r)
+				}
 			}
-			if normalizeSeriesTitle(r.Name) == want || normalizeSeriesTitle(r.OriginalName) == want {
-				seen[r.ID] = true
-				exact = append(exact, r)
-			}
+		}
+		if len(exact) > 0 {
+			break
 		}
 	}
 
@@ -266,30 +297,37 @@ func tvdbYear(r tvdb.SeriesResult) int {
 func (s *Scheduler) searchTMDBMovie(ctx context.Context, title string, year int, durationSecs float64) (*tmdb.MovieSearchResult, error) {
 	want := normalizeSeriesTitle(title)
 
-	var yearResults []tmdb.MovieSearchResult
-	if year > 0 {
-		var err error
-		yearResults, err = s.tmdb.SearchMovieAll(ctx, title, year)
+	// As in searchTMDBSeries: the other spelling only for an exact match.
+	var yearResults, allResults, exact []tmdb.MovieSearchResult
+	seen := make(map[int]bool)
+	for i, q := range titleSpellings(title) {
+		var yr []tmdb.MovieSearchResult
+		if year > 0 {
+			var err error
+			if yr, err = s.tmdb.SearchMovieAll(ctx, q, year); err != nil {
+				return nil, err
+			}
+		}
+		ar, err := s.tmdb.SearchMovieAll(ctx, q, 0)
 		if err != nil {
 			return nil, err
 		}
-	}
-	allResults, err := s.tmdb.SearchMovieAll(ctx, title, 0)
-	if err != nil {
-		return nil, err
-	}
-
-	var exact []tmdb.MovieSearchResult
-	seen := make(map[int]bool)
-	for _, list := range [][]tmdb.MovieSearchResult{yearResults, allResults} {
-		for _, r := range list {
-			if seen[r.ID] {
-				continue
+		if i == 0 {
+			yearResults, allResults = yr, ar
+		}
+		for _, list := range [][]tmdb.MovieSearchResult{yr, ar} {
+			for _, r := range list {
+				if seen[r.ID] {
+					continue
+				}
+				if normalizeSeriesTitle(r.Title) == want || normalizeSeriesTitle(r.OriginalTitle) == want {
+					seen[r.ID] = true
+					exact = append(exact, r)
+				}
 			}
-			if normalizeSeriesTitle(r.Title) == want || normalizeSeriesTitle(r.OriginalTitle) == want {
-				seen[r.ID] = true
-				exact = append(exact, r)
-			}
+		}
+		if len(exact) > 0 {
+			break
 		}
 	}
 

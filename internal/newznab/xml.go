@@ -299,10 +299,16 @@ func stripIPTVPrefix(s string) string {
 func sanitizeNameForTitle(name string) string {
 	s := strings.TrimSpace(iptvPrefixRe.ReplaceAllString(name, ""))
 	s = stripTrailingYear(s)
+	// Scene releases spell "&" as "and" ("Law.and.Order"), which is what
+	// arr's release parsing expects.
+	s = ampersandRe.ReplaceAllString(s, " and ")
 	s = nlGespokenRe.ReplaceAllString(s, "DUTCH")
 	// Normalise any double spaces left after stripping.
 	return strings.TrimSpace(strings.Join(strings.Fields(s), " "))
 }
+
+// ampersandRe matches "&" with any spaces around it.
+var ampersandRe = regexp.MustCompile(`\s*&\s*`)
 
 // langTagRe matches a bare language/country tag such as "EN" or "NL".
 var langTagRe = regexp.MustCompile(`^[A-Z]{2,3}$`)
